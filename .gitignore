@@ -1,0 +1,31 @@
+# General
+.DS_Store
+Thumbs.db
+
+# VS Code
+.vscode/
+
+# Python / Backend
+__pycache__/
+*.py[cod]
+*.so
+.venv/
+venv/
+env/
+.env
+*.db
+*.sqlite3
+
+# Node / Frontend
+node_modules/
+npm-debug.log
+yarn-error.log
+dist/
+coverage/
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Project specific
+.tools/

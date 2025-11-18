@@ -1,0 +1,9 @@
+﻿:root {
+  --color-brand-primary: #0f172a;
+  --color-brand-muted: #334155;
+  --color-brand-accent: #4f46e5;
+  --color-surface-base: #ffffff;
+  --color-surface-card: #f8fafc;
+  --radius-xl: 16px;
+  --radius-2xl: 32px;
+}

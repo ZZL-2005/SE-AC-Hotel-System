@@ -1,0 +1,50 @@
+"""FastAPI entry point for the Hotel Central AC Billing System."""
+from fastapi import FastAPI
+import asyncio
+import contextlib
+
+from app.config import get_settings
+from interfaces import ac_router, frontdesk_router, monitor_router, report_router
+from interfaces import deps
+
+app = FastAPI(title="Hotel Central AC Billing System")
+settings = get_settings()
+
+app.include_router(ac_router)
+app.include_router(frontdesk_router)
+app.include_router(monitor_router)
+app.include_router(report_router)
+
+from fastapi.middleware.cors import CORSMiddleware
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173"],  # 或者指定你的前端如 http://localhost:5173
+    allow_credentials=True,
+    allow_methods=["*"],  # 必须，解决 OPTIONS 问题
+    allow_headers=["*"],
+)
+@app.get("/health", tags=["health"])
+def health_check() -> dict:
+    """Expose a minimal health endpoint to help dev tooling."""
+    return {"status": "ok", "configVersion": settings.version}
+
+
+# Background scheduler ticker ----------------------------------------------
+@app.on_event("startup")
+async def _start_scheduler_loop() -> None:  # pragma: no cover - runtime wiring
+    async def _loop():
+        while True:
+            deps.scheduler.tick_1s()
+            await asyncio.sleep(1)
+
+    app.state._scheduler_task = asyncio.create_task(_loop())
+
+
+@app.on_event("shutdown")
+async def _stop_scheduler_loop() -> None:  # pragma: no cover - runtime wiring
+    task = getattr(app.state, "_scheduler_task", None)
+    if task:
+        task.cancel()
+        with contextlib.suppress(Exception):
+            await task
