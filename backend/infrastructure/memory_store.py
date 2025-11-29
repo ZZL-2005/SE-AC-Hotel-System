@@ -9,7 +9,7 @@ from domain.bill import ACBill
 from .repository import RoomRepository
 
 if TYPE_CHECKING:  # pragma: no cover
-    from application.scheduler import ServiceObject
+    from domain.service_object import ServiceObject
 
 
 class InMemoryRoomRepository(RoomRepository):

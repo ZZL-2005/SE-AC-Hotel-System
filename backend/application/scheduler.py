@@ -1,51 +1,25 @@
-"""Scheduler implementing调度+温控+计费 with DB-backed queues."""
+"""Scheduler implementing 调度+温控+计费，使用队列接口实现解耦。"""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Callable, Iterable, List, Optional
-
-from sqlmodel import select
 
 from app.config import AppConfig
 from application.billing_service import BillingService
 from domain.room import Room, RoomStatus
+from domain.queues import ServiceQueue, WaitingQueue
+from domain.service_object import ServiceObject, ServiceStatus, SPEED_PRIORITY
 from infrastructure.repository import RoomRepository
-
-SPEED_PRIORITY = {"HIGH": 3, "MID": 2, "LOW": 1}
-
-
-class ServiceStatus:
-    SERVING = "SERVING"
-    WAITING = "WAITING"
-    STOPPED = "STOPPED"
-
-
-@dataclass
-class ServiceObject:
-    room_id: str
-    speed: str
-    started_at: Optional[datetime] = None
-    served_seconds: int = 0
-    wait_seconds: int = 0
-    total_waited_seconds: int = 0
-    priority_token: int = 0
-    time_slice_enforced: bool = False
-    status: str = ServiceStatus.WAITING
-    current_fee: float = 0.0
 
 
 def compare_speed(speed_a: str, speed_b: str) -> int:
-    priority_a = SPEED_PRIORITY.get(speed_a, 0)
-    priority_b = SPEED_PRIORITY.get(speed_b, 0)
-    if priority_a > priority_b:
-        return 1
-    if priority_a < priority_b:
-        return -1
-    return 0
+    """比较两个风速的优先级"""
+    return ServiceObject.compare_speed(speed_a, speed_b)
 
 
 def select_victim_by_rules(services: List[ServiceObject], new_speed: str) -> Optional[ServiceObject]:
+    """根据调度规则选择被抢占的服务对象"""
     slower_items = [obj for obj in services if compare_speed(obj.speed, new_speed) < 0]
     if not slower_items:
         return None
@@ -63,7 +37,10 @@ def select_victim_by_rules(services: List[ServiceObject], new_speed: str) -> Opt
 
 @dataclass
 class Scheduler:
+    """调度器，负责管理空调服务的调度、温控和计费"""
     config: AppConfig
+    service_queue: Optional[ServiceQueue] = None
+    waiting_queue: Optional[WaitingQueue] = None
 
     def __post_init__(self) -> None:
         scheduling_cfg = self.config.scheduling or {}
@@ -73,14 +50,30 @@ class Scheduler:
         self.throttle_ms = int(throttle_cfg.get("change_temp_ms", 1000))
         temperature_cfg = self.config.temperature or {}
         self.auto_restart_threshold = float(temperature_cfg.get("auto_restart_threshold", 1.0))
-        self._room_lookup: Callable[[str], Optional["Room"]] = lambda room_id: None
-        self._iter_rooms: Callable[[], Iterable["Room"]] = lambda: []
+        self._room_lookup: Callable[[str], Optional[Room]] = lambda room_id: None
+        self._iter_rooms: Callable[[], Iterable[Room]] = lambda: []
         self._save_room: Callable[[Room], None] = lambda room: None
         self._billing_service: Optional[BillingService] = None
-        self._repository: Optional[RoomRepository] = None
 
-    # Public API -----------------------------------------------------------
+    # ================== 依赖注入 ==================
+    def set_queues(self, service_queue: ServiceQueue, waiting_queue: WaitingQueue) -> None:
+        """设置队列实现"""
+        self.service_queue = service_queue
+        self.waiting_queue = waiting_queue
+
+    def set_room_repository(self, repository: RoomRepository) -> None:
+        """设置房间仓储"""
+        self._room_lookup = repository.get_room
+        self._iter_rooms = repository.list_rooms
+        self._save_room = repository.save_room
+
+    def set_billing_service(self, billing_service: BillingService) -> None:
+        """设置计费服务"""
+        self._billing_service = billing_service
+
+    # ================== Public API ==================
     def on_new_request(self, room_id: str, speed: str) -> None:
+        """处理新的空调服务请求"""
         self._remove_existing(room_id)
         service = ServiceObject(room_id=room_id, speed=speed)
 
@@ -102,9 +95,11 @@ class Scheduler:
             self._enqueue_waiting(service, time_slice_enforced=False)
 
     def on_request(self, room_id: str, speed: str) -> None:
+        """处理请求（on_new_request 的别名）"""
         self.on_new_request(room_id, speed)
 
     def tick_1s(self) -> None:
+        """每秒执行一次的调度循环"""
         self._apply_pending_targets()
         self._advance_serving()
         self._advance_waiting()
@@ -113,15 +108,20 @@ class Scheduler:
         self._fill_capacity_if_possible()
 
     def tick(self, timestamp: datetime) -> None:  # pragma: no cover
+        """执行一次调度（timestamp 参数保留兼容性）"""
         self.tick_1s()
 
     def assign_service(self, service: ServiceObject) -> None:
+        """将服务对象分配到服务队列"""
         service.status = ServiceStatus.SERVING
         service.started_at = service.started_at or datetime.utcnow()
         service.wait_seconds = 0
         service.priority_token = 0
         service.time_slice_enforced = False
-        self._persist_service_object(service, is_new=True)
+        
+        if self.service_queue:
+            self.service_queue.add(service)
+        
         room = self._room_lookup(service.room_id)
         if room:
             room.is_serving = True
@@ -130,11 +130,15 @@ class Scheduler:
         self._start_detail_segment(service.room_id, service.speed)
 
     def release_service(self, room_id: str) -> None:
+        """释放服务（从服务队列移除）"""
         service = self._get_service_entry(room_id)
         if not service:
             return
         service.status = ServiceStatus.STOPPED
-        self._remove_service_persistence(room_id)
+        
+        if self.service_queue:
+            self.service_queue.remove(room_id)
+        
         self._close_detail_segment(room_id)
         room = self._room_lookup(room_id)
         if room:
@@ -143,10 +147,12 @@ class Scheduler:
         self._fill_capacity_if_possible()
 
     def cancel_request(self, room_id: str) -> None:
-        service = self._get_service_entry(room_id)
-        if service:
-            self._remove_service_persistence(room_id)
-        self._remove_wait_entry(room_id)
+        """取消请求（从服务队列和等待队列中移除）"""
+        if self.service_queue:
+            self.service_queue.remove(room_id)
+        if self.waiting_queue:
+            self.waiting_queue.remove(room_id)
+        
         self._close_detail_segment(room_id)
         room = self._room_lookup(room_id)
         if room:
@@ -154,99 +160,115 @@ class Scheduler:
             self._save_room(room)
 
     def preempt(self, victim: ServiceObject, new_service: ServiceObject) -> None:
-        self._remove_service_persistence(victim.room_id)
+        """抢占：将 victim 移到等待队列，将 new_service 分配到服务队列"""
+        if self.service_queue:
+            self.service_queue.remove(victim.room_id)
         self._close_detail_segment(victim.room_id)
         self._enqueue_waiting(victim, time_slice_enforced=False)
         self._boost_waiting_priority(new_service.speed)
         self.assign_service(new_service)
 
-    # Internal helpers -----------------------------------------------------
+    # ================== 内部辅助方法 ==================
     def _remove_existing(self, room_id: str) -> None:
+        """移除指定房间的现有服务/等待记录"""
         if self._get_service_entry(room_id):
             self.release_service(room_id)
-        self._remove_wait_entry(room_id)
+        if self.waiting_queue:
+            self.waiting_queue.remove(room_id)
 
     def _enqueue_waiting(self, service: ServiceObject, *, time_slice_enforced: bool) -> None:
+        """将服务对象加入等待队列"""
         service.time_slice_enforced = time_slice_enforced
         service.wait_seconds = self.time_slice_seconds
         service.total_waited_seconds = 0
         service.status = ServiceStatus.WAITING
-        self._save_wait_entry(service)
+        
+        if self.waiting_queue:
+            self.waiting_queue.add(service)
+        
         room = self._room_lookup(service.room_id)
         if room:
             room.is_serving = False
             self._save_room(room)
 
     def _fill_capacity_if_possible(self) -> None:
+        """当服务队列有空位时，从等待队列提升服务"""
         while True:
             services = self._list_service_entries()
             if len(services) >= self.max_concurrent:
                 break
-            wait_entries = self._list_wait_entries()
-            if not wait_entries:
+            if not self.waiting_queue or self.waiting_queue.size() == 0:
                 break
-            next_service = self._pop_highest_priority(wait_entries)
+            # 使用 Scheduler 的优先级选择逻辑
+            next_service = self._select_highest_priority_waiting()
             if not next_service:
                 break
-            self._remove_wait_entry(next_service.room_id)
+            self.waiting_queue.remove(next_service.room_id)
             self.assign_service(next_service)
 
     def _advance_serving(self) -> None:
+        """推进服务队列中所有对象的状态"""
         services = self._list_service_entries()
         for service in services:
             service.served_seconds += 1
             if self._billing_service:
                 increment = self._billing_service.tick_fee(service.room_id, service.speed)
                 service.current_fee += increment
-            self._persist_service_object(service, is_new=False)
+            if self.service_queue:
+                self.service_queue.update(service)
 
     def _advance_waiting(self) -> None:
+        """推进等待队列中所有对象的状态"""
         wait_entries = self._list_wait_entries()
         for service in wait_entries:
             service.total_waited_seconds += 1
             if service.wait_seconds > 0:
                 service.wait_seconds = max(0, service.wait_seconds - 1)
-            self._save_wait_entry(service)
+            if self.waiting_queue:
+                self.waiting_queue.update(service)
             if service.wait_seconds == 0 and service.time_slice_enforced:
                 self._handle_time_slice_expiry(service)
 
     def _handle_time_slice_expiry(self, waiting_service: ServiceObject) -> None:
+        """处理时间片到期：轮转服务"""
         services = self._list_service_entries()
         victim = self._longest_served(services)
         if not victim:
             return
-        self._remove_service_persistence(victim.room_id)
+        
+        # 将服务最长的移到等待队列
+        if self.service_queue:
+            self.service_queue.remove(victim.room_id)
         self._close_detail_segment(victim.room_id)
         victim.time_slice_enforced = True
         victim.status = ServiceStatus.WAITING
-        self._save_wait_entry(victim)
-        self._remove_wait_entry(waiting_service.room_id)
+        if self.waiting_queue:
+            self.waiting_queue.add(victim)
+        
+        # 将等待的服务提升到服务队列
+        if self.waiting_queue:
+            self.waiting_queue.remove(waiting_service.room_id)
         waiting_service.time_slice_enforced = False
         self.assign_service(waiting_service)
 
     def _boost_waiting_priority(self, new_speed: str) -> None:
+        """提升等待队列中相同风速的优先级令牌"""
         wait_entries = self._list_wait_entries()
         for service in wait_entries:
             if service.speed == new_speed:
                 service.priority_token += 1
-                self._save_wait_entry(service)
-
-    def set_room_repository(self, repository: RoomRepository) -> None:
-        self._repository = repository
-        self._room_lookup = repository.get_room
-        self._iter_rooms = repository.list_rooms
-        self._save_room = repository.save_room
-
-    def set_billing_service(self, billing_service: BillingService) -> None:
-        self._billing_service = billing_service
+                if self.waiting_queue:
+                    self.waiting_queue.update(service)
 
     def _apply_pending_targets(self) -> None:
+        """应用待处理的目标温度"""
         now = datetime.utcnow()
         for room in self._iter_rooms():
             room.apply_pending_target(now, self.throttle_ms)
             self._save_room(room)
 
     def _update_room_temperatures(self) -> None:
+        """更新所有房间的温度"""
         temp_cfg = self.config.temperature or {}
         active_rooms = {service.room_id for service in self._list_service_entries()}
         for room in self._iter_rooms():
@@ -260,6 +282,7 @@ class Scheduler:
                 self._save_room(room)
 
     def _handle_auto_restart(self) -> None:
+        """处理自动重启（当温度偏离目标时）"""
         active_rooms = {service.room_id for service in self._list_service_entries()}
         waiting_rooms = {entry.room_id for entry in self._list_wait_entries()}
         for room in self._iter_rooms():
@@ -270,138 +293,54 @@ class Scheduler:
             if room.needs_auto_restart(self.auto_restart_threshold):
                 self.on_new_request(room.room_id, room.speed or "MID")
 
-    # PPT 计费规则 ---------------------------------------------------------
+    # ================== 计费相关 ==================
     def _start_detail_segment(self, room_id: str, speed: str) -> None:
+        """开始新的计费详单段"""
         if not self._billing_service:
             return
         self._billing_service.start_new_detail_record(room_id, speed, datetime.utcnow())
 
     def _close_detail_segment(self, room_id: str) -> None:
+        """关闭当前计费详单段"""
         if not self._billing_service:
             return
         self._billing_service.close_current_detail_record(room_id, datetime.utcnow())
 
-    # Persistence helpers --------------------------------------------------
-    def _persist_service_object(self, service: ServiceObject, *, is_new: bool) -> None:
-        if not self._repository:
-            return
-        if is_new:
-            self._repository.add_service_object(service)
-        else:
-            self._repository.update_service_object(service)
-
-    def _remove_service_persistence(self, room_id: str) -> None:
-        if self._repository:
-            self._repository.remove_service_object(room_id)
-
+    # ================== 队列访问方法 ==================
     def _list_service_entries(self) -> List[ServiceObject]:
-        repo = self._repository
-        if not repo:
+        """获取服务队列中的所有条目"""
+        if not self.service_queue:
             return []
-        if hasattr(repo, "list_service_objects"):
-            return list(repo.list_service_objects())  # type: ignore[attr-defined]
-        services_attr = getattr(repo, "_services", None)
-        if services_attr is not None:
-            return [self._clone_service(obj) for obj in services_attr.values()]
-        return self._list_service_entries_sqlite(repo)
-
-    def _list_service_entries_sqlite(self, repo: RoomRepository) -> List[ServiceObject]:
-        try:
-            from infrastructure.sqlite_repo import SQLiteRoomRepository
-            from infrastructure.database import SessionLocal
-            from infrastructure.models import ServiceObjectModel
-        except ImportError:  # pragma: no cover - fallback
-            return []
-
-        if not isinstance(repo, SQLiteRoomRepository):
-            return []
-
-        with SessionLocal() as session:
-            models = session.exec(select(ServiceObjectModel)).all()
-        return [self._service_from_model(model) for model in models]
+        return self.service_queue.list_all()
 
     def _list_wait_entries(self) -> List[ServiceObject]:
-        repo = self._repository
-        if not repo:
+        """获取等待队列中的所有条目"""
+        if not self.waiting_queue:
             return []
-        if hasattr(repo, "list_wait_entries"):
-            return list(repo.list_wait_entries())
-        return self._list_wait_entries_sqlite(repo)
-
-    def _list_wait_entries_sqlite(self, repo: RoomRepository) -> List[ServiceObject]:
-        try:
-            from infrastructure.sqlite_repo import SQLiteRoomRepository
-            from infrastructure.database import SessionLocal
-            from infrastructure.models import WaitEntryModel
-        except ImportError:  # pragma: no cover
-            return []
-
-        if not isinstance(repo, SQLiteRoomRepository):
-            services_attr = getattr(repo, "_wait_entries", None)
-            if services_attr is not None:
-                return [self._clone_service(obj) for obj in services_attr.values()]
-            return []
-
-        with SessionLocal() as session:
-            models = session.exec(select(WaitEntryModel)).all()
-        return [self._wait_from_model(model) for model in models]
+        return self.waiting_queue.list_all()
 
     def _get_service_entry(self, room_id: str) -> Optional[ServiceObject]:
-        for service in self._list_service_entries():
-            if service.room_id == room_id:
-                return service
-        return None
-
-    def _save_wait_entry(self, service: ServiceObject) -> None:
-        if self._repository:
-            self._repository.add_wait_entry(service)
-
-    def _remove_wait_entry(self, room_id: str) -> None:
-        if self._repository:
-            self._repository.remove_wait_entry(room_id)
-
-    def _service_from_model(self, model) -> ServiceObject:
-        return ServiceObject(
-            room_id=model.room_id,
-            speed=model.speed,
-            started_at=model.started_at,
-            served_seconds=model.served_seconds,
-            wait_seconds=model.wait_seconds,
-            total_waited_seconds=model.total_waited_seconds,
-            priority_token=model.priority_token,
-            time_slice_enforced=model.time_slice_enforced,
-            status=model.status,
-            current_fee=model.current_fee,
-        )
-
-    def _wait_from_model(self, model) -> ServiceObject:
-        return ServiceObject(
-            room_id=model.room_id,
-            speed=model.speed,
-            wait_seconds=model.wait_seconds,
-            total_waited_seconds=model.total_waited_seconds,
-            priority_token=model.priority_token,
-            status=ServiceStatus.WAITING,
-        )
-
-    def _clone_service(self, service: ServiceObject) -> ServiceObject:
-        return ServiceObject(**service.__dict__)
-
-    def _pop_highest_priority(self, entries: List[ServiceObject]) -> Optional[ServiceObject]:
-        if not entries:
+        """根据房间 ID 获取服务队列中的条目"""
+        if not self.service_queue:
             return None
-
-        def priority_key(obj: ServiceObject) -> tuple[int, int, int]:
-            return (
-                SPEED_PRIORITY.get(obj.speed, 0),
-                obj.priority_token,
-                obj.total_waited_seconds,
-            )
-
-        best = max(entries, key=priority_key)
-        return best
+        return self.service_queue.get(room_id)
 
     def _longest_served(self, services: List[ServiceObject]) -> Optional[ServiceObject]:
+        """获取服务时间最长的服务对象"""
         if not services:
             return None
         return max(services, key=lambda obj: obj.served_seconds)
+
+    def _select_highest_priority_waiting(self) -> Optional[ServiceObject]:
+        """
+        从等待队列中选择优先级最高的服务对象。
+        
+        优先级规则（业务逻辑在 Scheduler 中实现）：
+        1. 风速优先级：HIGH > MID > LOW
+        2. 同风速时，优先级令牌高的优先
+        3. 同令牌时，等待时间长的优先
+        """
+        wait_entries = self._list_wait_entries()
+        if not wait_entries:
+            return None
+        return max(wait_entries, key=lambda s: s.priority_key())
