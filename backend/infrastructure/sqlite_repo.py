@@ -21,7 +21,7 @@ from .models import (
 )
 
 if TYPE_CHECKING:  # pragma: no cover
-    from application.scheduler import ServiceObject
+    from domain.service_object import ServiceObject
 
 
 class SQLiteRoomRepository(RoomRepository):
@@ -247,7 +247,7 @@ class SQLiteRoomRepository(RoomRepository):
         model.current_fee = service.current_fee
 
     def _service_object_from_wait(self, model: WaitEntryModel) -> "ServiceObject":
-        from application.scheduler import ServiceObject, ServiceStatus
+        from domain.service_object import ServiceObject, ServiceStatus
 
         return ServiceObject(
             room_id=model.room_id,

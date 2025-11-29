@@ -7,7 +7,7 @@ from typing import Iterable, Optional, TYPE_CHECKING
 from domain.room import Room
 
 if TYPE_CHECKING:  # pragma: no cover
-    from application.scheduler import ServiceObject
+    from domain.service_object import ServiceObject
     from domain.detail_record import ACDetailRecord
     from domain.bill import ACBill
 
