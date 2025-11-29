@@ -4,7 +4,6 @@ export type RoomStatus = {
   currentTemp: number;
   targetTemp: number;
   speed: string | null;
-  mode?: string;
   isServing: boolean;
   isWaiting: boolean;
   currentFee: number;
@@ -14,4 +13,5 @@ export type RoomStatus = {
   serviceSpeed?: string | null;
   serviceStartedAt?: string | null;
   waitSpeed?: string | null;
+  mode?: string | null;
 };

@@ -19,7 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],  # 或者指定你的前端如 http://localhost:5173
+    allow_origins=["http://localhost:5173", "http://localhost:5174"],  # 支持前端在不同端口运行
     allow_credentials=True,
     allow_methods=["*"],  # 必须，解决 OPTIONS 问题
     allow_headers=["*"],

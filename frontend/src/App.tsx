@@ -1,4 +1,4 @@
-import { NavLink, Outlet } from "react-router-dom";
+import { NavLink, Outlet, useLocation } from "react-router-dom";
 
 const navItems = [
   { to: "/", label: "首页" },
@@ -9,9 +9,12 @@ const navItems = [
 ];
 
 function App() {
+  const location = useLocation();
+  const isMonitorPage = location.pathname === "/monitor";
+
   return (
-    <div className="min-h-screen bg-[#fbfbfd]">
-      {/* Apple 风格导航栏 */}
+    <div className={`min-h-screen ${isMonitorPage ? "bg-[#f5f5f7]" : "bg-[#fbfbfd]"}`}>
+      {/* 导航栏 */}
       <header className="sticky top-0 z-50 glass border-b border-black/[0.04]">
         <div className="mx-auto flex h-12 max-w-[1200px] items-center justify-between px-6">
           {/* Logo */}
@@ -44,19 +47,25 @@ function App() {
         </div>
       </header>
 
-      {/* 主内容区 - 大面积留白 */}
-      <main className="mx-auto w-full max-w-[1200px] px-6 py-16">
+      {/* 主内容区 */}
+      <main className={
+        isMonitorPage 
+          ? "w-full" 
+          : "mx-auto w-full max-w-[1200px] px-6 py-16"
+      }>
         <Outlet />
       </main>
 
-      {/* 极简页脚 */}
-      <footer className="border-t border-black/[0.04] py-8">
-        <div className="mx-auto max-w-[1200px] px-6">
-          <p className="text-center text-xs text-[#86868b]">
-            Software Engineering · Central AC Billing System · 2025
-          </p>
-        </div>
-      </footer>
+      {/* 页脚 - 监控页面不显示 */}
+      {!isMonitorPage && (
+        <footer className="border-t border-black/[0.04] py-8">
+          <div className="mx-auto max-w-[1200px] px-6">
+            <p className="text-center text-xs text-[#86868b]">
+              Software Engineering · Central AC Billing System · 2025
+            </p>
+          </div>
+        </footer>
+      )}
     </div>
   );
 }

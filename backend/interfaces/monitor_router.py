@@ -44,7 +44,6 @@ def list_room_status() -> Dict[str, List[Dict[str, Any]]]:
                 "currentTemp": room.current_temp,
                 "targetTemp": room.target_temp,
                 "speed": room.speed,
-                "mode": room.mode,
                 "isServing": bool(service),
                 "isWaiting": bool(wait),
                 "currentFee": current_fee,
