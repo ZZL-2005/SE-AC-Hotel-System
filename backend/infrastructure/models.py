@@ -16,6 +16,7 @@ class RoomModel(SQLModel, table=True):
     mode: str = Field(default="cool")
     speed: str = Field(default="MID")
     is_serving: bool = Field(default=False)
+    ac_enabled: bool = Field(default=False)  # 空调是否被用户开启
     total_fee: float = Field(default=0.0)
     active_service_id: Optional[str] = Field(default=None)
     last_temp_change_timestamp: Optional[datetime] = None
@@ -41,6 +42,7 @@ class WaitEntryModel(SQLModel, table=True):
     wait_seconds: int = 0
     total_waited_seconds: int = 0
     priority_token: int = 0
+    time_slice_enforced: bool = False  # 添加时间片轮转标记
     requested_at: datetime = Field(default_factory=datetime.utcnow)
 
 

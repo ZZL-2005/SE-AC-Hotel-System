@@ -22,6 +22,7 @@ class Room:
     mode: str = "cool"
     speed: str = "MID"
     is_serving: bool = False
+    ac_enabled: bool = False  # 空调是否被用户开启（用于控制自动重启）
     total_fee: float = 0.0
     active_service_id: Optional[str] = None
     last_temp_change_timestamp: Optional[datetime] = None

@@ -55,6 +55,7 @@ class SQLiteRoomRepository(RoomRepository):
                 model.mode = room.mode
                 model.speed = room.speed
                 model.is_serving = room.is_serving
+                model.ac_enabled = room.ac_enabled
                 model.total_fee = room.total_fee
                 model.active_service_id = room.active_service_id
                 model.last_temp_change_timestamp = room.last_temp_change_timestamp
@@ -201,6 +202,25 @@ class SQLiteRoomRepository(RoomRepository):
                 )
             )
 
+    def get_latest_accommodation_order(self, room_id: str) -> Optional[dict]:
+        with SessionLocal() as session:
+            statement = (
+                select(AccommodationOrderModel)
+                .where(AccommodationOrderModel.room_id == room_id)
+                .order_by(AccommodationOrderModel.check_in_at.desc())
+            )
+            model = session.exec(statement).first()
+            if not model:
+                return None
+            return {
+                "order_id": model.order_id,
+                "room_id": model.room_id,
+                "customer_name": model.customer_name,
+                "nights": model.nights,
+                "deposit": model.deposit,
+                "check_in_at": model.check_in_at,
+            }
+
     def add_accommodation_bill(self, bill: dict) -> None:
         with SessionLocal() as session, session.begin():
             session.add(
@@ -211,6 +231,23 @@ class SQLiteRoomRepository(RoomRepository):
                     created_at=bill["created_at"],
                 )
             )
+
+    def get_latest_accommodation_bill(self, room_id: str) -> Optional[dict]:
+        with SessionLocal() as session:
+            statement = (
+                select(AccommodationBillModel)
+                .where(AccommodationBillModel.room_id == room_id)
+                .order_by(AccommodationBillModel.created_at.desc())
+            )
+            model = session.exec(statement).first()
+            if not model:
+                return None
+            return {
+                "bill_id": model.bill_id,
+                "room_id": model.room_id,
+                "total_fee": model.total_fee,
+                "created_at": model.created_at,
+            }
 
     # Helpers --------------------------------------------------------------
     def _room_from_model(self, model: RoomModel) -> Room:
@@ -223,10 +260,11 @@ class SQLiteRoomRepository(RoomRepository):
             mode=model.mode,
             speed=model.speed,
             is_serving=model.is_serving,
+            ac_enabled=model.ac_enabled,
             total_fee=model.total_fee,
             active_service_id=model.active_service_id,
             last_temp_change_timestamp=model.last_temp_change_timestamp,
-             pending_target_temp=model.pending_target_temp,
+            pending_target_temp=model.pending_target_temp,
             metadata={},
         )
 

@@ -20,7 +20,9 @@ def compare_speed(speed_a: str, speed_b: str) -> int:
 
 def select_victim_by_rules(services: List[ServiceObject], new_speed: str) -> Optional[ServiceObject]:
     """根据调度规则选择被抢占的服务对象"""
+    print(f"[select_victim] new_speed={new_speed}, services speeds={[s.speed for s in services]}")
     slower_items = [obj for obj in services if compare_speed(obj.speed, new_speed) < 0]
+    print(f"[select_victim] slower_items={[s.room_id for s in slower_items]}")
     if not slower_items:
         return None
     if len(slower_items) == 1:
@@ -78,18 +80,38 @@ class Scheduler:
         service = ServiceObject(room_id=room_id, speed=speed)
 
         services = self._list_service_entries()
+        print(f"[Scheduler] on_new_request: room={room_id}, speed={speed}")
+        print(f"[Scheduler] current services: {len(services)}/{self.max_concurrent}")
+        for s in services:
+            print(f"  - room={s.room_id}, speed={s.speed}, served={s.served_seconds}s")
+
         if len(services) < self.max_concurrent:
+            print(f"[Scheduler] Queue not full, assigning directly")
             self.assign_service(service)
             return
 
         victim = select_victim_by_rules(services, service.speed)
+        print(f"[Scheduler] select_victim_by_rules result: {victim.room_id if victim else None}")
         if victim:
+            print(f"[Scheduler] Preempting: victim={victim.room_id} (speed={victim.speed})")
             self.preempt(victim, service)
             return
 
+        # 比较新请求与服务队列中每个对象的风速
         cmp_results = [compare_speed(service.speed, item.speed) for item in services]
         highest_cmp = max(cmp_results) if cmp_results else -1
-        if highest_cmp == 0:
+        print(f"[Scheduler] No victim found")
+        print(f"[Scheduler] New request speed: {service.speed}")
+        print(f"[Scheduler] Service queue speeds: {[s.speed for s in services]}")
+        print(f"[Scheduler] Compare results: {cmp_results}, highest_cmp={highest_cmp}")
+        
+        # 只有当新请求风速与服务队列中最高风速相同时，才启用时间片轮转
+        # 但这个逻辑有问题：应该是只要有相同风速就启用轮转
+        # 修正：检查是否存在相同风速
+        has_same_speed = any(s.speed == service.speed for s in services)
+        print(f"[Scheduler] Has same speed in service queue: {has_same_speed}")
+        
+        if has_same_speed:
             self._enqueue_waiting(service, time_slice_enforced=True)
         else:
             self._enqueue_waiting(service, time_slice_enforced=False)
@@ -220,13 +242,25 @@ class Scheduler:
     def _advance_waiting(self) -> None:
         """推进等待队列中所有对象的状态"""
         wait_entries = self._list_wait_entries()
+        services = self._list_service_entries()
+        service_speeds = {s.speed for s in services}
+        
         for service in wait_entries:
             service.total_waited_seconds += 1
-            if service.wait_seconds > 0:
-                service.wait_seconds = max(0, service.wait_seconds - 1)
+            
+            # 动态修正：如果等待对象风速与服务队列中存在相同，启用时间片轮转
+            if not service.time_slice_enforced and service.speed in service_speeds:
+                service.time_slice_enforced = True
+                service.wait_seconds = self.time_slice_seconds  # 重置等待时间
+                print(f"[Scheduler] Fixed time_slice_enforced for room={service.room_id}")
+            elif service.wait_seconds > 0:
+                service.wait_seconds -= 1
+            
             if self.waiting_queue:
                 self.waiting_queue.update(service)
+            
             if service.wait_seconds == 0 and service.time_slice_enforced:
+                print(f"[Scheduler] Time slice expired for room={service.room_id}, triggering rotation")
                 self._handle_time_slice_expiry(service)
 
     def _handle_time_slice_expiry(self, waiting_service: ServiceObject) -> None:
@@ -241,9 +275,18 @@ class Scheduler:
             self.service_queue.remove(victim.room_id)
         self._close_detail_segment(victim.room_id)
         victim.time_slice_enforced = True
+        victim.wait_seconds = self.time_slice_seconds  # 重置等待时间！
+        victim.served_seconds = 0  # 重置服务时间
         victim.status = ServiceStatus.WAITING
         if self.waiting_queue:
             self.waiting_queue.add(victim)
+        
+        room = self._room_lookup(victim.room_id)
+        if room:
+            room.is_serving = False
+            self._save_room(room)
+        
+        print(f"[Scheduler] Rotated out: room={victim.room_id}, wait_seconds={victim.wait_seconds}")
         
         # 将等待的服务提升到服务队列
         if self.waiting_queue:
@@ -287,6 +330,8 @@ class Scheduler:
         waiting_rooms = {entry.room_id for entry in self._list_wait_entries()}
         for room in self._iter_rooms():
             if room.status == RoomStatus.VACANT:
+                continue
+            if not room.ac_enabled:  # 用户已关闭空调，不自动重启
                 continue
             if room.room_id in active_rooms or room.room_id in waiting_rooms:
                 continue

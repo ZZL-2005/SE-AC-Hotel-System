@@ -129,6 +129,7 @@ class SQLiteWaitingQueue(WaitingQueue):
             wait_seconds=service.wait_seconds,
             total_waited_seconds=service.total_waited_seconds,
             priority_token=service.priority_token,
+            time_slice_enforced=service.time_slice_enforced,
         )
 
     def _to_entity(self, model: WaitEntryModel) -> ServiceObject:
@@ -138,6 +139,7 @@ class SQLiteWaitingQueue(WaitingQueue):
             wait_seconds=model.wait_seconds,
             total_waited_seconds=model.total_waited_seconds,
             priority_token=model.priority_token,
+            time_slice_enforced=model.time_slice_enforced,
             status=ServiceStatus.WAITING,
         )
 
