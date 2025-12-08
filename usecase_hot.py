@@ -1,6 +1,11 @@
 import requests
-
+import time
 BASE_URL = "http://localhost:8000"
+
+
+
+
+
 resp = requests.get(f"{BASE_URL}/monitor/hyperparams")
 
 print("Status:", resp.status_code)
