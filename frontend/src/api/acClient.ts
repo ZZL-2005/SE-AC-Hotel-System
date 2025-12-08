@@ -14,10 +14,9 @@ export type RoomStateResponse = {
 };
 
 export const acClient = {
-  powerOn(roomId: string, payload: Record<string, unknown>): Promise<ApiResult<RoomStateResponse>> {
+  powerOn(roomId: string): Promise<ApiResult<RoomStateResponse>> {
     return http<RoomStateResponse>(`/rooms/${roomId}/ac/power-on`, {
       method: "POST",
-      body: JSON.stringify(payload),
     });
   },
   changeTemp(roomId: string, targetTemp: number): Promise<ApiResult<RoomStateResponse>> {

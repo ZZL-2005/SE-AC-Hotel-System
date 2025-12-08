@@ -43,6 +43,15 @@ class Scheduler:
     waiting_queue: Optional[WaitingQueue] = None
 
     def __post_init__(self) -> None:
+        self.update_config(self.config)
+        self._room_lookup: Callable[[str], Optional[Room]] = lambda room_id: None
+        self._iter_rooms: Callable[[], Iterable[Room]] = lambda: []
+        self._save_room: Callable[[Room], None] = lambda room: None
+        self._billing_service: Optional[BillingService] = None
+
+    def update_config(self, config: AppConfig) -> None:
+        """Reload scheduler-related hyperparameters at runtime."""
+        self.config = config
         scheduling_cfg = self.config.scheduling or {}
         self.max_concurrent = int(scheduling_cfg.get("max_concurrent", 3))
         self.time_slice_seconds = int(scheduling_cfg.get("time_slice_seconds", 60))
@@ -50,10 +59,6 @@ class Scheduler:
         self.throttle_ms = int(throttle_cfg.get("change_temp_ms", 1000))
         temperature_cfg = self.config.temperature or {}
         self.auto_restart_threshold = float(temperature_cfg.get("auto_restart_threshold", 1.0))
-        self._room_lookup: Callable[[str], Optional[Room]] = lambda room_id: None
-        self._iter_rooms: Callable[[], Iterable[Room]] = lambda: []
-        self._save_room: Callable[[Room], None] = lambda room: None
-        self._billing_service: Optional[BillingService] = None
 
     # ================== 依赖注入 ==================
     def set_queues(self, service_queue: ServiceQueue, waiting_queue: WaitingQueue) -> None:

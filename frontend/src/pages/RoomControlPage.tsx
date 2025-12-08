@@ -122,7 +122,6 @@ export function RoomControlPage() {
   const roomId = params.roomId ?? "";
 
   const [roomState, setRoomState] = useState<RoomStateResponse | null>(null);
-  const [mode, setMode] = useState<"cool" | "heat">("cool");
   const [speed, setSpeed] = useState("MID");
   const [targetInput, setTargetInput] = useState(24);
   const [message, setMessage] = useState<string | null>(null);
@@ -148,7 +147,6 @@ export function RoomControlPage() {
 
     setRoomState(state);
 
-    if (state.mode === "cool" || state.mode === "heat") setMode(state.mode);
     if (state.speed) {
       setSpeed(state.speed);
       setPendingSpeed(state.speed);
@@ -218,11 +216,7 @@ export function RoomControlPage() {
       }
       setAutoDispatching(true);
       try {
-        const { data, error } = await acClient.powerOn(roomId, {
-          mode,
-          targetTemp: desiredTemp,
-          speed,
-        });
+        const { data, error } = await acClient.powerOn(roomId);
         if (error) {
           setMessage(error);
           return false;
@@ -234,7 +228,7 @@ export function RoomControlPage() {
         setAutoDispatching(false);
       }
     },
-    [roomId, roomState, autoDispatching, mode, speed, targetInput]
+    [roomId, roomState, autoDispatching, targetInput]
   );
 
   // 切换电源开关

@@ -15,14 +15,21 @@ class BillingService:
     def __init__(self, config: AppConfig, repository: RoomRepository):
         self.config = config
         self.repository = repository
-        billing_cfg = config.billing or {}
+        self._apply_billing_config()
+        self.current_records: Dict[str, ACDetailRecord] = {}
+
+    def _apply_billing_config(self) -> None:
+        billing_cfg = self.config.billing or {}
         self.price_per_unit = float(billing_cfg.get("price_per_unit", 1.0))
         self.rate_map = {
             "HIGH": float(billing_cfg.get("rate_high_unit_per_min", 1.0)),
             "MID": float(billing_cfg.get("rate_mid_unit_per_min", 0.5)),
             "LOW": float(billing_cfg.get("rate_low_unit_per_min", 1 / 3)),
         }
-        self.current_records: Dict[str, ACDetailRecord] = {}
+
+    def update_config(self, config: AppConfig) -> None:
+        self.config = config
+        self._apply_billing_config()
 
     # 详单分段逻辑 --------------------------------------------------------
     def start_new_detail_record(self, room_id: str, speed: str, timestamp: datetime) -> None:

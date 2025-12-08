@@ -19,7 +19,6 @@ from infrastructure.models import (
     WaitEntryModel,
 )
 
-settings = deps.settings
 repository = deps.repository
 billing_service = deps.billing_service
 scheduler = deps.scheduler
@@ -49,11 +48,15 @@ class CheckOutRequest(BaseModel):
 
 
 def _default_temperature() -> float:
-    return float((settings.temperature or {}).get("default_target", 25.0))
+    return float((deps.settings.temperature or {}).get("default_target", 25.0))
 
 
-def _accommodation_rate() -> float:
-    return float((settings.accommodation or {}).get("rate_per_night", 300.0))
+def _accommodation_rate(room_id: Optional[str] = None) -> float:
+    if room_id:
+        room = repository.get_room(room_id)
+        if room and room.rate_per_night:
+            return room.rate_per_night
+    return float((deps.settings.accommodation or {}).get("rate_per_night", 300.0))
 
 
 def _get_or_create_room(room_id: str) -> Room:
@@ -142,7 +145,7 @@ def check_out(payload: CheckOutRequest) -> Dict[str, Any]:
     if not order:
         raise HTTPException(status_code=400, detail="Room has no active accommodation order.")
 
-    rate = _accommodation_rate()
+    rate = _accommodation_rate(payload.roomId)
     room_fee = float(order.nights) * rate
     deposit = float(order.deposit)
 

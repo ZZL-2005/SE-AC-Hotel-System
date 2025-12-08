@@ -17,6 +17,7 @@ class RoomModel(SQLModel, table=True):
     speed: str = Field(default="MID")
     is_serving: bool = Field(default=False)
     total_fee: float = Field(default=0.0)
+    rate_per_night: float = Field(default=300.0)
     active_service_id: Optional[str] = Field(default=None)
     last_temp_change_timestamp: Optional[datetime] = None
     pending_target_temp: Optional[float] = None

@@ -3,12 +3,10 @@ from fastapi import FastAPI
 import asyncio
 import contextlib
 
-from app.config import get_settings
 from interfaces import ac_router, frontdesk_router, monitor_router, report_router
 from interfaces import deps
 
 app = FastAPI(title="Hotel Central AC Billing System")
-settings = get_settings()
 
 app.include_router(ac_router)
 app.include_router(frontdesk_router)
@@ -27,7 +25,7 @@ app.add_middleware(
 @app.get("/health", tags=["health"])
 def health_check() -> dict:
     """Expose a minimal health endpoint to help dev tooling."""
-    return {"status": "ok", "configVersion": settings.version}
+    return {"status": "ok", "configVersion": deps.settings.version}
 
 
 # Background scheduler ticker ----------------------------------------------
@@ -36,7 +34,11 @@ async def _start_scheduler_loop() -> None:  # pragma: no cover - runtime wiring
     async def _loop():
         while True:
             deps.scheduler.tick_1s()
-            await asyncio.sleep(1)
+            clock_cfg = deps.settings.clock or {}
+            ratio = float(clock_cfg.get("ratio", 1.0))
+            if ratio <= 0:
+                ratio = 1.0
+            await asyncio.sleep(max(0.01, 1.0 / ratio))
 
     app.state._scheduler_task = asyncio.create_task(_loop())
 

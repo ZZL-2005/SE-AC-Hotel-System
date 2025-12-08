@@ -1,5 +1,7 @@
-import { useEffect, useMemo, useState, useCallback, useRef } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { RoomStatusGrid } from "../components";
+import { adminClient } from "../api/adminClient";
+import type { HyperParamSettings, HyperParamUpdatePayload } from "../api/adminClient";
 import { monitorClient } from "../api/monitorClient";
 import type { RoomStatus } from "../types/rooms";
 
@@ -11,6 +13,114 @@ interface SystemEvent {
   roomId?: string;
   message: string;
 }
+
+type HyperFormState = {
+  maxConcurrent: string;
+  timeSliceSeconds: string;
+  clockRatio: string;
+  changeTempMs: string;
+  autoRestartThreshold: string;
+  idleDriftPerMin: string;
+  midDeltaPerMin: string;
+  highMultiplier: string;
+  lowMultiplier: string;
+  defaultTarget: string;
+  pricePerUnit: string;
+  rateHighUnitPerMin: string;
+  rateMidUnitPerMin: string;
+  rateLowUnitPerMin: string;
+  ratePerNight: string;
+};
+
+const emptyHyperForm: HyperFormState = {
+  maxConcurrent: "",
+  timeSliceSeconds: "",
+  clockRatio: "",
+  changeTempMs: "",
+  autoRestartThreshold: "",
+  idleDriftPerMin: "",
+  midDeltaPerMin: "",
+  highMultiplier: "",
+  lowMultiplier: "",
+  defaultTarget: "",
+  pricePerUnit: "",
+  rateHighUnitPerMin: "",
+  rateMidUnitPerMin: "",
+  rateLowUnitPerMin: "",
+  ratePerNight: "",
+};
+
+type HyperFieldConfig = {
+  key: keyof HyperFormState;
+  label: string;
+  suffix?: string;
+  hint?: string;
+  step?: string;
+};
+
+const hyperFieldGroups: Array<{ title: string; fields: HyperFieldConfig[] }> = [
+  {
+    title: "调度策略",
+    fields: [
+      { key: "maxConcurrent", label: "最大并发房间", suffix: "间" },
+      { key: "timeSliceSeconds", label: "时间片 (秒)", suffix: "s" },
+      { key: "clockRatio", label: "时钟倍率", hint: "1 = 实时，10 = 10 倍速", step: "0.5" },
+    ],
+  },
+  {
+    title: "温控参数",
+    fields: [
+      { key: "defaultTarget", label: "默认目标温度", suffix: "°C", step: "0.1" },
+      { key: "autoRestartThreshold", label: "自动重启阈值", suffix: "°C", step: "0.1" },
+      { key: "idleDriftPerMin", label: "空闲回温速度", suffix: "°C/min", step: "0.1" },
+      { key: "midDeltaPerMin", label: "中风降温速率", suffix: "°C/min", step: "0.1" },
+      { key: "highMultiplier", label: "高风系数", step: "0.05" },
+      { key: "lowMultiplier", label: "低风系数", step: "0.05" },
+    ],
+  },
+  {
+    title: "计费/房费",
+    fields: [
+      { key: "pricePerUnit", label: "电价 (元/度)", step: "0.1" },
+      { key: "rateHighUnitPerMin", label: "高风能耗 (度/min)", step: "0.05" },
+      { key: "rateMidUnitPerMin", label: "中风能耗 (度/min)", step: "0.05" },
+      { key: "rateLowUnitPerMin", label: "低风能耗 (度/min)", step: "0.05" },
+      { key: "ratePerNight", label: "房费", suffix: "¥/晚", step: "1" },
+    ],
+  },
+  {
+    title: "交互节流",
+    fields: [{ key: "changeTempMs", label: "调温节流窗口", suffix: "ms", step: "50" }],
+  },
+];
+
+const hyperFieldLabelMap: Record<keyof HyperFormState, string> = hyperFieldGroups.reduce(
+  (acc, group) => {
+    group.fields.forEach((field) => {
+      acc[field.key] = field.label;
+    });
+    return acc;
+  },
+  {} as Record<keyof HyperFormState, string>
+);
+
+const mapHyperParamsToForm = (params: HyperParamSettings): HyperFormState => ({
+  maxConcurrent: String(params.maxConcurrent ?? ""),
+  timeSliceSeconds: String(params.timeSliceSeconds ?? ""),
+  clockRatio: String(params.clockRatio ?? ""),
+  changeTempMs: String(params.changeTempMs ?? ""),
+  autoRestartThreshold: String(params.autoRestartThreshold ?? ""),
+  idleDriftPerMin: String(params.idleDriftPerMin ?? ""),
+  midDeltaPerMin: String(params.midDeltaPerMin ?? ""),
+  highMultiplier: String(params.highMultiplier ?? ""),
+  lowMultiplier: String(params.lowMultiplier ?? ""),
+  defaultTarget: String(params.defaultTarget ?? ""),
+  pricePerUnit: String(params.pricePerUnit ?? ""),
+  rateHighUnitPerMin: String(params.rateHighUnitPerMin ?? ""),
+  rateMidUnitPerMin: String(params.rateMidUnitPerMin ?? ""),
+  rateLowUnitPerMin: String(params.rateLowUnitPerMin ?? ""),
+  ratePerNight: String(params.ratePerNight ?? ""),
+});
 
 export function MonitorPage() {
   const [rooms, setRooms] = useState<RoomStatus[]>([]);
@@ -24,11 +134,49 @@ export function MonitorPage() {
   const [systemEvents, setSystemEvents] = useState<SystemEvent[]>([]); // 系统事件日志
   const prevRoomsRef = useRef<RoomStatus[]>([]); // 用于对比状态变化
   const [tempHistory, setTempHistory] = useState<Map<number, Array<{ time: Date; temp: number }>>>(new Map()); // 楼层温度历史数据
+  const loadRoomsRef = useRef<(() => Promise<void>) | null>(null); // 保存最新的房间加载函数，便于外部复用
+  const [adminForm, setAdminForm] = useState({
+    roomId: "",
+    initialTemp: "",
+    ratePerNight: "",
+  });
+  const [adminSubmitting, setAdminSubmitting] = useState(false);
+  const [adminMessage, setAdminMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
+  const [showOpenRoomModal, setShowOpenRoomModal] = useState(false);
+  const [hyperForm, setHyperForm] = useState<HyperFormState>({ ...emptyHyperForm });
+  const [hyperParams, setHyperParams] = useState<HyperParamSettings | null>(null);
+  const [hyperMessage, setHyperMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
+  const [hyperSaving, setHyperSaving] = useState(false);
+  const [hyperFetching, setHyperFetching] = useState(true);
 
   // 时间更新
   useEffect(() => {
     const timer = setInterval(() => setCurrentTime(new Date()), 1000);
     return () => clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadHyperParams = async () => {
+      setHyperFetching(true);
+      const { data, error } = await adminClient.getHyperParams();
+      if (cancelled) {
+        return;
+      }
+      if (!data || error) {
+        setHyperMessage({ type: "error", text: error ?? "无法加载运行参数" });
+        setHyperFetching(false);
+        return;
+      }
+      setHyperParams(data);
+      setHyperForm(mapHyperParamsToForm(data));
+      setHyperMessage(null);
+      setHyperFetching(false);
+    };
+    loadHyperParams();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
@@ -105,10 +253,14 @@ export function MonitorPage() {
         });
       }
     };
+    loadRoomsRef.current = load;
     load();
-    const interval = window.setInterval(load, 4000);
+    const interval = window.setInterval(() => {
+      loadRoomsRef.current?.();
+    }, 4000);
     return () => {
       cancelled = true;
+      loadRoomsRef.current = null;
       window.clearInterval(interval);
     };
   }, []);
@@ -340,16 +492,122 @@ export function MonitorPage() {
     setTimeout(() => setHighlightedRoomId(null), 3000);
   }, [allRooms]);
 
+  const closeAdminModal = () => {
+    setShowOpenRoomModal(false);
+    setAdminMessage(null);
+  };
+
+  const handleAdminRoomCreate = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setAdminMessage(null);
+
+    const trimmedRoomId = adminForm.roomId.trim();
+    if (!trimmedRoomId) {
+      setAdminMessage({ type: "error", text: "请填写房间编号" });
+      return;
+    }
+    if (!adminForm.initialTemp.trim()) {
+      setAdminMessage({ type: "error", text: "请填写初始温度" });
+      return;
+    }
+    if (!adminForm.ratePerNight.trim()) {
+      setAdminMessage({ type: "error", text: "请填写计费单价" });
+      return;
+    }
+
+    const initialTemp = Number(adminForm.initialTemp);
+    if (Number.isNaN(initialTemp)) {
+      setAdminMessage({ type: "error", text: "初始温度需为数字" });
+      return;
+    }
+
+    const ratePerNight = Number(adminForm.ratePerNight);
+    if (Number.isNaN(ratePerNight)) {
+      setAdminMessage({ type: "error", text: "计费单价需为数字" });
+      return;
+    }
+
+    setAdminSubmitting(true);
+    const payload = {
+      roomId: trimmedRoomId,
+      initialTemp,
+      ratePerNight,
+    };
+
+    const { data, error: requestError } = await adminClient.createRoom(payload);
+    setAdminSubmitting(false);
+
+    if (requestError) {
+      setAdminMessage({ type: "error", text: requestError });
+      return;
+    }
+
+    setAdminMessage({ type: "success", text: `房间 ${data?.roomId ?? payload.roomId} 创建成功` });
+    setAdminForm({ roomId: "", initialTemp: "", ratePerNight: "" });
+    const reload = loadRoomsRef.current;
+    if (reload) {
+      await reload();
+    }
+  };
+
+  const handleHyperFieldChange = (key: keyof HyperFormState, value: string) => {
+    setHyperForm((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const resetHyperForm = () => {
+    if (hyperParams) {
+      setHyperForm(mapHyperParamsToForm(hyperParams));
+    } else {
+      setHyperForm({ ...emptyHyperForm });
+    }
+    setHyperMessage(null);
+  };
+
+  const handleHyperParamSave = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setHyperMessage(null);
+    const entries = Object.entries(hyperForm) as Array<[keyof HyperFormState, string]>;
+    for (const [key, value] of entries) {
+      if (value.trim() === "") {
+        setHyperMessage({ type: "error", text: `请填写${hyperFieldLabelMap[key]}` });
+        return;
+      }
+    }
+
+    const payload: HyperParamUpdatePayload = {};
+    for (const [key, value] of entries) {
+      const parsed = Number(value);
+      if (Number.isNaN(parsed)) {
+        setHyperMessage({ type: "error", text: `${hyperFieldLabelMap[key]} 需要是数字` });
+        return;
+      }
+      payload[key as keyof HyperParamUpdatePayload] = parsed;
+    }
+
+    setHyperSaving(true);
+    const { data, error } = await adminClient.updateHyperParams(payload);
+    setHyperSaving(false);
+    if (!data || error) {
+      setHyperMessage({ type: "error", text: error ?? "保存失败，请稍后重试" });
+      return;
+    }
+    setHyperParams(data);
+    setHyperForm(mapHyperParamsToForm(data));
+    setHyperMessage({ type: "success", text: "参数已更新并立即生效" });
+  };
+
+  const adminInputClass = "px-3 py-2.5 rounded-xl bg-[#f5f5f7] border border-black/[0.06] text-sm focus:outline-none focus:ring-2 focus:ring-[#0071e3]/40 transition";
+
   return (
     <div 
-      className="h-[calc(100vh-48px)] -mx-6 px-5 pt-0 pb-4 flex flex-col overflow-hidden"
+      className="h-[calc(100vh-48px)] -mx-6 px-5 pt-0 pb-4 flex flex-col overflow-y-auto custom-scrollbar"
       style={{
         background: `#f5f5f7`,
       }}
     >
       {/* 顶部状态栏 - 单行紧凑设计 */}
-      <header className="flex items-center justify-between mb-2 flex-shrink-0 bg-white backdrop-blur-xl px-4 py-2 rounded-2xl mt-2 shadow-sm border border-black/[0.04]">
-        <div className="flex items-center gap-3">
+      <header className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between mb-3 flex-shrink-0 bg-white backdrop-blur-xl px-5 py-3 rounded-2xl mt-2 shadow-sm border border-black/[0.04]">
+        <div className="flex flex-wrap items-center gap-4">
           <div className="w-8 h-8 bg-[#1d1d1f] rounded-xl flex items-center justify-center">
             <svg className="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
               <path strokeLinecap="round" strokeLinejoin="round" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
@@ -365,7 +623,7 @@ export function MonitorPage() {
         </div>
         </div>
         
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-3">
           {/* 状态指标 - 横向紧凑 */}
           <div className="flex gap-1.5">
             <StatusBadge label="总房间" value={100} color="slate" />
@@ -395,11 +653,11 @@ export function MonitorPage() {
       )}
 
       {/* 主内容区：左右两栏布局 */}
-      <div className="flex gap-2 flex-1 min-h-0">
+      <div className="flex gap-4 flex-1 min-h-0">
         {/* 左侧：房间状态矩阵 */}
         <main className="flex-1 flex flex-col min-w-0">
-          <div className="flex items-center justify-between mb-3 px-1 flex-shrink-0">
-            <div className="flex items-center gap-4">
+          <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between mb-4 px-1 flex-shrink-0">
+            <div className="flex flex-wrap items-center gap-3">
               <h2 className="text-base font-semibold text-[#1d1d1f] flex items-center gap-2.5">
                 <span className="w-1 h-5 bg-[#0071e3] rounded-full"></span>
                 房间状态
@@ -425,7 +683,7 @@ export function MonitorPage() {
               </button>
             </div>
 
-            <div className="flex items-center gap-4 text-[11px]">
+            <div className="flex flex-wrap items-center gap-3 text-[11px] md:justify-end">
               <LegendItem color="#34c759" label="服务中" count={serving.length} pulse />
               <LegendItem color="#ff9500" label="等待中" count={waiting.length} />
               <LegendItem color="#e5e5e5" label="空闲" count={100 - activeRooms.length} />
@@ -450,7 +708,7 @@ export function MonitorPage() {
         </main>
 
         {/* 右侧：楼层可视化 + 调度队列 */}
-        <aside className="w-[480px] flex flex-col gap-2.5 flex-shrink-0">
+        <aside className="w-full lg:w-[480px] flex flex-col gap-3 flex-shrink-0">
           {/* 楼层3D可视化 */}
           <FloorVisualization
             floorRooms={floorRooms}
@@ -479,6 +737,106 @@ export function MonitorPage() {
                   </div>
           </Panel>
 
+          <Panel title="系统控制台" icon="building" color="blue">
+            <div className="space-y-5 max-h-[420px] overflow-y-auto pr-2 custom-scrollbar">
+              <div className="rounded-2xl bg-[#f5f5f7] px-4 py-4 border border-black/[0.03] flex flex-col gap-3 text-[11px] text-[#5c5c5f]">
+                <div>
+                  <p className="text-[#1d1d1f] font-semibold mb-1">快速开房间</p>
+                  <p>自定义房号、初始温度与房费，适合测试或临时调度。</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAdminMessage(null);
+                    setShowOpenRoomModal(true);
+                  }}
+                  className="w-full py-2.5 rounded-xl text-sm font-semibold text-white bg-[#1d1d1f] hover:bg-black transition-all"
+                >
+                  打开创建面板
+                </button>
+              </div>
+
+              <div className="rounded-2xl bg-white px-4 py-4 border border-black/[0.05]">
+                <div className="flex items-center justify-between mb-4">
+                  <div>
+                    <p className="text-xs text-[#86868b] uppercase tracking-wide">Hyper Parameters</p>
+                    <h3 className="text-base font-semibold text-[#1d1d1f]">运行超参数</h3>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={resetHyperForm}
+                    disabled={hyperFetching || hyperSaving}
+                    className="text-xs font-semibold text-[#1d1d1f] disabled:text-[#c7c7cc]"
+                  >
+                    还原
+                  </button>
+                </div>
+                {hyperFetching && !hyperParams ? (
+                  <p className="text-xs text-[#86868b]">参数加载中...</p>
+                ) : (
+                  <form className="space-y-4" onSubmit={handleHyperParamSave}>
+                    {hyperFieldGroups.map((group) => (
+                      <div key={group.title} className="space-y-2">
+                        <p className="text-[11px] text-[#86868b] font-medium">{group.title}</p>
+                        <div className="grid gap-3 md:grid-cols-2">
+                          {group.fields.map((field) => (
+                            <div key={field.key} className="flex flex-col gap-1.5">
+                              <label className="text-[11px] text-[#5c5c5f] font-medium">{field.label}</label>
+                              <div className="flex items-center gap-2">
+                                <input
+                                  type="number"
+                                  step={field.step ?? "1"}
+                                  className={`${adminInputClass} w-full`}
+                                  value={hyperForm[field.key]}
+                                  onChange={(e) => handleHyperFieldChange(field.key, e.target.value)}
+                                  disabled={hyperFetching}
+                                />
+                                {field.suffix && (
+                                  <span className="text-[11px] text-[#86868b] whitespace-nowrap">{field.suffix}</span>
+                                )}
+                              </div>
+                              {field.hint && <span className="text-[10px] text-[#86868b]">{field.hint}</span>}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                    {hyperMessage && (
+                      <div
+                        className={`text-xs rounded-xl px-3 py-2 font-medium ${
+                          hyperMessage.type === "error"
+                            ? "bg-[#ff3b30]/10 text-[#ff3b30]"
+                            : "bg-[#34c759]/10 text-[#34c759]"
+                        }`}
+                      >
+                        {hyperMessage.text}
+                      </div>
+                    )}
+                    <div className="flex gap-3">
+                      <button
+                        type="button"
+                        onClick={resetHyperForm}
+                        disabled={hyperFetching || hyperSaving}
+                        className="flex-1 py-2.5 rounded-xl text-sm font-semibold bg-[#f5f5f7] text-[#1d1d1f] disabled:text-[#c7c7cc]"
+                      >
+                        重置表单
+                      </button>
+                      <button
+                        type="submit"
+                        disabled={hyperSaving || hyperFetching}
+                        className={`flex-1 py-2.5 rounded-xl text-sm font-semibold text-white transition-all ${
+                          hyperSaving || hyperFetching ? "bg-[#1d1d1f]/60 cursor-not-allowed" : "bg-[#1d1d1f] hover:bg-black"
+                        }`}
+                      >
+                        {hyperSaving ? "保存中..." : "保存参数"}
+                      </button>
+                    </div>
+                  </form>
+                )}
+              </div>
+            </div>
+          </Panel>
+
           {/* 系统事件日志 */}
           <Panel title="事件日志" icon="log" color="primary" className="flex-1 min-h-0">
             <div className="h-[200px] overflow-y-scroll custom-scrollbar pr-1 pb-6">
@@ -495,6 +853,93 @@ export function MonitorPage() {
           </Panel>
         </aside>
                   </div>
+
+      {/* 管理员开房间弹窗 */}
+      {showOpenRoomModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm px-4">
+          <div className="w-full max-w-md rounded-3xl bg-white p-6 shadow-2xl">
+            <div className="flex items-center justify-between mb-4">
+              <div>
+                <p className="text-xs text-[#86868b]">Admin</p>
+                <h3 className="text-xl font-semibold text-[#1d1d1f]">开房间</h3>
+              </div>
+              <button
+                type="button"
+                onClick={closeAdminModal}
+                className="text-[#86868b] hover:text-[#1d1d1f] text-2xl leading-none"
+                aria-label="关闭"
+              >
+                ×
+              </button>
+            </div>
+            <form className="space-y-4" onSubmit={handleAdminRoomCreate}>
+              <div className="flex flex-col gap-1.5">
+                <label className="text-[11px] text-[#5c5c5f] font-medium">房间编号</label>
+                <input
+                  className={adminInputClass}
+                  placeholder="例如 305"
+                  value={adminForm.roomId}
+                  onChange={(e) => setAdminForm((prev) => ({ ...prev, roomId: e.target.value }))}
+                />
+                <span className="text-[10px] text-[#86868b]">唯一编号，建议使用三位数字。</span>
+              </div>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="flex flex-col gap-1.5">
+                  <label className="text-[11px] text-[#5c5c5f] font-medium">初始温度 (°C)</label>
+                  <input
+                    type="number"
+                    step="0.1"
+                    className={adminInputClass}
+                    placeholder="例如 26.5"
+                    value={adminForm.initialTemp}
+                    onChange={(e) => setAdminForm((prev) => ({ ...prev, initialTemp: e.target.value }))}
+                  />
+                </div>
+                <div className="flex flex-col gap-1.5">
+                  <label className="text-[11px] text-[#5c5c5f] font-medium">房费 (¥/天)</label>
+                  <input
+                    type="number"
+                    step="0.1"
+                    className={adminInputClass}
+                    placeholder="例如 150"
+                    value={adminForm.ratePerNight}
+                    onChange={(e) => setAdminForm((prev) => ({ ...prev, ratePerNight: e.target.value }))}
+                  />
+                </div>
+              </div>
+              {adminMessage && (
+                <div
+                  className={`text-xs rounded-xl px-3 py-2 font-medium ${
+                    adminMessage.type === "error"
+                      ? "bg-[#ff3b30]/10 text-[#ff3b30]"
+                      : "bg-[#34c759]/10 text-[#34c759]"
+                  }`}
+                >
+                  {adminMessage.text}
+                </div>
+              )}
+              <div className="flex gap-3">
+                <button
+                  type="button"
+                  className="flex-1 py-2.5 rounded-xl text-sm font-semibold bg-[#f5f5f7] text-[#1d1d1f] hover:bg-[#e8e8ed]"
+                  onClick={closeAdminModal}
+                >
+                  取消
+                </button>
+                <button
+                  type="submit"
+                  disabled={adminSubmitting}
+                  className={`flex-1 py-2.5 rounded-xl text-sm font-semibold text-white transition-all ${
+                    adminSubmitting ? "bg-[#1d1d1f]/60 cursor-not-allowed" : "bg-[#1d1d1f] hover:bg-black"
+                  }`}
+                >
+                  {adminSubmitting ? "提交中..." : "确认开房"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
 
       {/* 房间详情弹窗 */}
       {selectedRoom && (
@@ -567,7 +1012,7 @@ function Panel({ title, icon, color, children, className = "", noPadding = false
               </div>
         <span className="text-sm font-semibold text-[#1d1d1f]">{title}</span>
               </div>
-      <div className={noPadding ? "" : "p-4"}>
+      <div className={noPadding ? "" : "p-5"}>
         {children}
       </div>
     </div>
