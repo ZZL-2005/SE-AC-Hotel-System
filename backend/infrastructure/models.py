@@ -21,6 +21,7 @@ class RoomModel(SQLModel, table=True):
     active_service_id: Optional[str] = Field(default=None)
     last_temp_change_timestamp: Optional[datetime] = None
     pending_target_temp: Optional[float] = None
+    manual_powered_off: bool = Field(default=False)
 
 
 class ServiceObjectModel(SQLModel, table=True):

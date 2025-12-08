@@ -293,6 +293,8 @@ class Scheduler:
         for room in self._iter_rooms():
             if room.status == RoomStatus.VACANT:
                 continue
+            if getattr(room, "manual_powered_off", False):
+                continue
             if room.room_id in active_rooms or room.room_id in waiting_rooms:
                 continue
             if room.needs_auto_restart(self.auto_restart_threshold):

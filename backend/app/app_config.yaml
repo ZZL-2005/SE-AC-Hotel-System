@@ -1,10 +1,14 @@
-﻿version: v0.1.0
+version: v0.1.0
 temperature:
-  cool_range: [18, 25]
-  heat_range: [25, 30]
-  default_target: 25
+  cool_range:
+  - 18
+  - 25
+  heat_range:
+  - 25
+  - 30
+  default_target: 23.0
   auto_restart_threshold: 1.0
-  idle_drift_per_min: 0.5
+  idle_drift_per_min: 0.3
   mid_delta_per_min: 0.5
   high_multiplier: 1.2
   low_multiplier: 0.8
@@ -12,13 +16,13 @@ billing:
   price_per_unit: 1.0
   rate_high_unit_per_min: 1.0
   rate_mid_unit_per_min: 0.5
-  rate_low_unit_per_min: 0.3333333
+  rate_low_unit_per_min: 0.3333333333333333
 scheduling:
   max_concurrent: 3
   time_slice_seconds: 60
 throttle:
   change_temp_ms: 1000
 accommodation:
-  rate_per_night: 300.0
+  rate_per_night: 150.0
 clock:
-  ratio: 1.0
+  ratio: 60.0

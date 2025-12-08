@@ -11,6 +11,8 @@ export type RoomStateResponse = {
   isServing?: boolean;
   isWaiting?: boolean;
   mode?: string;
+  manualPowerOff?: boolean;
+  autoRestartThreshold?: number;
 };
 
 export const acClient = {

@@ -9,19 +9,20 @@ from infrastructure.sqlite_repo import SQLiteRoomRepository
 
 # 队列实现：可切换为 SQLite 实现
 from domain.queues import ServiceQueue, WaitingQueue
-from infrastructure.memory_queue import InMemoryServiceQueue, InMemoryWaitingQueue
-# from infrastructure.sqlite_queue import SQLiteServiceQueue, SQLiteWaitingQueue
+# 默认使用 SQLite 队列以便接口可以直接查询 ServiceObject/WaitEntry 表，保持状态一致
+from infrastructure.sqlite_queue import SQLiteServiceQueue, SQLiteWaitingQueue
 
 settings = get_settings()
 
 # 创建仓储
 repository = SQLiteRoomRepository()
 
-# 创建队列（使用内存实现，可切换为 SQLite 实现）
-service_queue: ServiceQueue = InMemoryServiceQueue()
-waiting_queue: WaitingQueue = InMemoryWaitingQueue()
-# service_queue: ServiceQueue = SQLiteServiceQueue()  # SQLite 实现
-# waiting_queue: WaitingQueue = SQLiteWaitingQueue()  # SQLite 实现
+# 创建队列（使用 SQLite 实现，便于和 API 读取的状态保持一致）
+service_queue: ServiceQueue = SQLiteServiceQueue()
+waiting_queue: WaitingQueue = SQLiteWaitingQueue()
+# 清理遗留的数据，保持与内存队列一致的“冷启动”体验
+service_queue.clear()
+waiting_queue.clear()
 
 # 创建服务
 billing_service = BillingService(settings, repository)

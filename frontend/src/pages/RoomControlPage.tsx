@@ -130,6 +130,7 @@ export function RoomControlPage() {
   const [isPoweredOn, setIsPoweredOn] = useState(false);
   const [autoDispatching, setAutoDispatching] = useState(false);
   const throttleRef = useRef<number | null>(null);
+  const [autoRestartThreshold, setAutoRestartThreshold] = useState(0.2);
 
   // 本地待提交的调节值
   const [pendingTemp, setPendingTemp] = useState(24);
@@ -157,6 +158,9 @@ export function RoomControlPage() {
     }
     if (state.isServing || state.isWaiting) {
       setIsPoweredOn(true);
+    }
+    if (typeof state.autoRestartThreshold === "number") {
+      setAutoRestartThreshold(state.autoRestartThreshold);
     }
 
     // --- 新增：记录温度变化数据 ---
@@ -209,7 +213,7 @@ export function RoomControlPage() {
         return false;
       }
       const tempGap = Math.abs(currentTemp - desiredTemp);
-      const needsService = tempGap > 0.2;
+      const needsService = tempGap > autoRestartThreshold;
       const idle = !roomState.isServing && !roomState.isWaiting;
       if (!needsService || !idle) {
         return false;
@@ -228,7 +232,7 @@ export function RoomControlPage() {
         setAutoDispatching(false);
       }
     },
-    [roomId, roomState, autoDispatching, targetInput]
+    [roomId, roomState, autoDispatching, targetInput, autoRestartThreshold]
   );
 
   // 切换电源开关
