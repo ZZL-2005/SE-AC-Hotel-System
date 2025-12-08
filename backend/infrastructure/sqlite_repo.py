@@ -60,6 +60,7 @@ class SQLiteRoomRepository(RoomRepository):
                 model.active_service_id = room.active_service_id
                 model.last_temp_change_timestamp = room.last_temp_change_timestamp
                 model.pending_target_temp = room.pending_target_temp
+                model.manual_powered_off = room.manual_powered_off
                 session.add(model)
 
     # Service objects ------------------------------------------------------
@@ -228,7 +229,8 @@ class SQLiteRoomRepository(RoomRepository):
             rate_per_night=model.rate_per_night,
             active_service_id=model.active_service_id,
             last_temp_change_timestamp=model.last_temp_change_timestamp,
-             pending_target_temp=model.pending_target_temp,
+            pending_target_temp=model.pending_target_temp,
+            manual_powered_off=model.manual_powered_off,
             metadata={},
         )
 

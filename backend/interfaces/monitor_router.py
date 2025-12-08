@@ -19,6 +19,7 @@ from infrastructure.models import (
     RoomModel,
     ServiceObjectModel,
     WaitEntryModel,
+    AccommodationOrderModel,
 )
 from interfaces import deps
 
@@ -102,7 +103,7 @@ def list_room_status() -> Dict[str, List[Dict[str, Any]]]:
         rooms = session.exec(select(RoomModel)).all()
         service_models = session.exec(select(ServiceObjectModel)).all()
         wait_models = session.exec(select(WaitEntryModel)).all()
-        fee_map = _detail_fee_map(session)
+        fee_map = _detail_fee_map_since_checkin(session)
 
     service_map = {model.room_id: model for model in service_models}
     wait_map = {model.room_id: model for model in wait_models}
@@ -163,12 +164,44 @@ def _derive_status(room: RoomModel, service, wait) -> str:
     return "idle"
 
 
-def _detail_fee_map(session) -> Dict[str, float]:
-    stmt = select(ACDetailRecordModel.room_id, func.coalesce(func.sum(ACDetailRecordModel.fee_value), 0.0)).group_by(
-        ACDetailRecordModel.room_id
-    )
-    rows = session.exec(stmt).all()
-    return {room_id: fee for room_id, fee in rows}
+def _detail_fee_map_since_checkin(session) -> Dict[str, float]:
+    """Sum AC detail fees since the latest accommodation check-in per room.
+
+    If a room has no accommodation order, fall back to sum of all records (rare).
+    """
+    # Fetch latest check-in time per room
+    order_rows = session.exec(
+        select(
+            AccommodationOrderModel.room_id,
+            func.max(AccommodationOrderModel.check_in_at)
+        ).group_by(AccommodationOrderModel.room_id)
+    ).all()
+    latest_checkin_map: Dict[str, datetime] = {room_id: check_in_at for room_id, check_in_at in order_rows if check_in_at}
+
+    fee_map: Dict[str, float] = {}
+    # Rooms that have accommodation: sum fee_value where started_at >= check_in_at
+    for room_id, check_in_at in latest_checkin_map.items():
+        rows = session.exec(
+            select(func.coalesce(func.sum(ACDetailRecordModel.fee_value), 0.0)).where(
+                ACDetailRecordModel.room_id == room_id,
+                ACDetailRecordModel.started_at >= check_in_at,
+            )
+        ).all()
+        fee_map[room_id] = float(rows[0] if rows else 0.0)
+
+    # For rooms without accommodation orders, sum all records to avoid zeroing unexpectedly
+    rooms_without_order = session.exec(select(RoomModel.room_id)).all()
+    for rid in rooms_without_order:
+        if rid in fee_map:
+            continue
+        rows = session.exec(
+            select(func.coalesce(func.sum(ACDetailRecordModel.fee_value), 0.0)).where(
+                ACDetailRecordModel.room_id == rid
+            )
+        ).all()
+        fee_map[rid] = float(rows[0] if rows else 0.0)
+
+    return fee_map
 
 
 def _hyperparams_from_settings() -> HyperParamResponse:

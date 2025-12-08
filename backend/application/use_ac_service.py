@@ -75,12 +75,14 @@ class UseACService:
         room.mark_occupied(initial_temp=room.current_temp)
 
         temp_cfg = self.config.temperature or {}
+        # Always reset to global default when target_temp not provided
         default_target = float(temp_cfg.get("default_target", room.target_temp))
 
         room.mode = mode or room.mode or "cool"
         room.speed = speed or room.speed or "MID"
         room.target_temp = target_temp if target_temp is not None else default_target
         room.is_serving = False
+        room.manual_powered_off = False
 
         self.repo.save_room(room)
         self.billing_service.close_current_detail_record(room_id, datetime.utcnow())
@@ -105,6 +107,7 @@ class UseACService:
         room = self._ensure_room(room_id)
         room.is_serving = False
         room.status = RoomStatus.OCCUPIED
+        room.manual_powered_off = True
         scheduler = self._ensure_scheduler()
         self.billing_service.close_current_detail_record(room_id, datetime.utcnow())
         self.repo.save_room(room)

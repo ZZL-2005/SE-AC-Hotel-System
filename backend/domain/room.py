@@ -27,6 +27,7 @@ class Room:
     active_service_id: Optional[str] = None
     last_temp_change_timestamp: Optional[datetime] = None
     pending_target_temp: Optional[float] = None
+    manual_powered_off: bool = False
     metadata: dict = field(default_factory=dict)
 
     def mark_occupied(self, initial_temp: Optional[float] = None) -> None:

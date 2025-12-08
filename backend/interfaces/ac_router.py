@@ -45,6 +45,7 @@ def _room_state(room_id: str) -> Dict[str, Any]:
             or 0.0
         )
 
+        temp_cfg = deps.settings.temperature or {}
         return {
             "roomId": room.room_id,
             "status": "serving" if service else ("waiting" if wait else ("occupied" if room.status == "OCCUPIED" else "idle")),
@@ -56,6 +57,8 @@ def _room_state(room_id: str) -> Dict[str, Any]:
             "currentFee": service.current_fee if service else 0.0,
             "totalFee": float(fee_row),
             "mode": room.mode,
+            "manualPowerOff": room.manual_powered_off,
+            "autoRestartThreshold": float(temp_cfg.get("auto_restart_threshold", 1.0)),
         }
 
 
