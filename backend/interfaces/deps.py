@@ -1,7 +1,7 @@
 """Shared singletons for settings, repository, scheduler, and services."""
 from __future__ import annotations
 
-from app.config import get_settings
+from app.config import AppConfig, get_settings
 from application.billing_service import BillingService
 from application.scheduler import Scheduler
 from application.use_ac_service import UseACService
@@ -30,3 +30,20 @@ scheduler.set_queues(service_queue, waiting_queue)  # 注入队列
 scheduler.set_room_repository(repository)
 scheduler.set_billing_service(billing_service)
 ac_service = UseACService(settings, scheduler, repository, billing_service)
+
+
+def apply_settings(new_settings: AppConfig) -> None:
+	"""Update global settings reference and refresh dependent singletons."""
+	global settings
+	settings = new_settings
+	billing_service.update_config(new_settings)
+	scheduler.update_config(new_settings)
+	ac_service.update_config(new_settings)
+
+
+def reload_settings_from_disk() -> AppConfig:
+	"""Force re-read of app_config.yaml and propagate changes."""
+	get_settings.cache_clear()
+	fresh = get_settings()
+	apply_settings(fresh)
+	return fresh

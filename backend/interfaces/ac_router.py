@@ -15,9 +15,9 @@ router = APIRouter(prefix="/rooms", tags=["ac"])
 
 
 class PowerOnRequest(BaseModel):
-    mode: str
-    targetTemp: float
-    speed: str
+    mode: Optional[str] = Field(default=None, description="Override HVAC mode, defaults to config")
+    targetTemp: Optional[float] = Field(default=None, description="Optional target temperature")
+    speed: Optional[str] = Field(default=None, description="Optional fan speed override")
 
 
 class ChangeTempRequest(BaseModel):
@@ -61,8 +61,13 @@ def _room_state(room_id: str) -> Dict[str, Any]:
 
 # ========== 1. Power On ==========
 @router.post("/{room_id}/ac/power-on")
-def power_on(room_id: str, payload: PowerOnRequest) -> Dict[str, Any]:
-    deps.ac_service.power_on(room_id, payload.mode, payload.targetTemp, payload.speed)
+def power_on(room_id: str, payload: Optional[PowerOnRequest] = None) -> Dict[str, Any]:
+    deps.ac_service.power_on(
+        room_id,
+        payload.mode if payload else None,
+        payload.targetTemp if payload else None,
+        payload.speed if payload else None,
+    )
     return _room_state(room_id)
 
 

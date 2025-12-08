@@ -20,3 +20,5 @@ throttle:
   change_temp_ms: 1000
 accommodation:
   rate_per_night: 300.0
+clock:
+  ratio: 1.0

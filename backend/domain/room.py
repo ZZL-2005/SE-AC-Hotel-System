@@ -23,6 +23,7 @@ class Room:
     speed: str = "MID"
     is_serving: bool = False
     total_fee: float = 0.0
+    rate_per_night: float = 300.0
     active_service_id: Optional[str] = None
     last_temp_change_timestamp: Optional[datetime] = None
     pending_target_temp: Optional[float] = None
