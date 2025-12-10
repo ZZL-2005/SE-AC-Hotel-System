@@ -1,4 +1,4 @@
-﻿version: v0.0.1
+version: v0.0.1
 
 # 存储后端配置
 storage:
@@ -33,4 +33,4 @@ throttle:
 accommodation:
   rate_per_night: 150.0
 clock:
-  ratio: 60.0
+  ratio: 1.0

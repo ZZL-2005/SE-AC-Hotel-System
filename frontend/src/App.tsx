@@ -1,16 +1,65 @@
-import { NavLink, Outlet, useLocation } from "react-router-dom";
+import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
+import { useAuth } from "./contexts/AuthContext";
+import type { Role } from "./contexts/AuthContext";
 
-const navItems = [
-  { to: "/", label: "首页" },
-  { to: "/room-control", label: "房间控制" },
-  { to: "/frontdesk", label: "前台服务" },
-  { to: "/monitor", label: "监控面板" },
-  { to: "/report", label: "统计报表" },
-];
+// 根据角色获取导航项
+const getNavItems = (role: Role) => {
+  if (!role) return [];
+  
+  switch (role) {
+    case "customer":
+      return [
+        { to: "/customer", label: "🏨 我的房间" },
+      ];
+    case "receptionist":
+      return [
+        { to: "/receptionist", label: "🎯 前台服务" },
+      ];
+    case "manager":
+      return [
+        { to: "/manager", label: "📊 报表查询" },
+      ];
+    case "ac-admin":
+      return [
+        { to: "/ac-admin", label: "❄️ 监控面板" },
+      ];
+    case "debug":
+      return [
+        { to: "/debug", label: "🛠️ 调试面板" },
+      ];
+    default:
+      return [];
+  }
+};
 
 function App() {
   const location = useLocation();
-  const isMonitorPage = location.pathname === "/monitor";
+  const navigate = useNavigate();
+  const { role, logout } = useAuth();
+  const isMonitorPage = location.pathname === "/monitor" || location.pathname === "/ac-admin";
+  const isDebugPage = location.pathname === "/debug";
+  const isLoginPage = location.pathname === "/login";
+  
+  const navItems = getNavItems(role);
+  
+  const handleLogout = () => {
+    logout();
+    navigate("/login");
+  };
+
+  // 调试页面不显示导航栏
+  if (isDebugPage) {
+    return <Outlet />;
+  }
+  
+  // 登录页面不显示导航栏
+  if (isLoginPage) {
+    return (
+      <div className="min-h-screen">
+        <Outlet />
+      </div>
+    );
+  }
 
   return (
     <div className={`min-h-screen ${isMonitorPage ? "bg-[#f5f5f7]" : "bg-[#fbfbfd]"}`}>
@@ -43,6 +92,16 @@ function App() {
                 {item.label}
               </NavLink>
             ))}
+            
+            {/* 退出登录按钮 */}
+            {role && (
+              <button
+                onClick={handleLogout}
+                className="ml-2 px-4 py-1.5 text-xs font-medium text-[#ff3b30] hover:bg-[#ff3b30]/10 rounded-full transition-all"
+              >
+                退出
+              </button>
+            )}
           </nav>
         </div>
       </header>

@@ -3,6 +3,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { FeePanel, RoomHeader, SpeedSelector, TempGauge } from "../components";
 import { acClient, type RoomStateResponse } from "../api/acClient";
 import { frontdeskClient, type CheckOutResponse } from "../api/frontdeskClient";
+import { getSocket, subscribeRoom } from "../api/socket";
 
 // Apple 风格温度历史折线图
 type TempPoint = { time: string; temp: number };
@@ -143,10 +144,29 @@ export function RoomControlPage() {
     { time: string; temp: number }[]
   >([]);
 
+  // 费率常量 (元/秒)
+  const FEE_RATES: Record<string, number> = {
+    HIGH: 1.0 / 60,
+    MID: 0.5 / 60,
+    LOW: (1.0 / 3.0) / 60,
+  };
+
+  // 伪计费状态
+  const [displayedCurrentFee, setDisplayedCurrentFee] = useState(0);
+  const [displayedTotalFee, setDisplayedTotalFee] = useState(0);
+
   const applyResponse = (state?: RoomStateResponse | null) => {
     if (!state) return;
 
     setRoomState(state);
+
+    // 更新显示费用（校准）
+    if (typeof state.currentFee === "number") {
+      setDisplayedCurrentFee(state.currentFee);
+    }
+    if (typeof state.totalFee === "number") {
+      setDisplayedTotalFee(state.totalFee);
+    }
 
     if (state.speed) {
       setSpeed(state.speed);
@@ -196,9 +216,29 @@ export function RoomControlPage() {
       navigate("/room-control", { replace: true });
       return;
     }
+    
+    // 初始加载一次
     loadState();
-    const interval = window.setInterval(loadState, 4000);
-    return () => window.clearInterval(interval);
+    
+    // 订阅房间状态更新（Socket.IO）
+    const socket = getSocket();
+    subscribeRoom(roomId);
+    
+    const handleRoomState = (state: RoomStateResponse) => {
+      if (state.roomId === roomId) {
+        applyResponse(state);
+      }
+    };
+    
+    socket.on("room_state", handleRoomState);
+    
+    // 保留一个较长间隔的备用轮询，防止 WebSocket 断开时无法更新
+    const interval = window.setInterval(loadState, 30000);
+    
+    return () => {
+      socket.off("room_state", handleRoomState);
+      window.clearInterval(interval);
+    };
   }, [loadState, navigate, roomId]);
 
   const requestServiceIfNeeded = useCallback(
@@ -313,6 +353,21 @@ export function RoomControlPage() {
     void requestServiceIfNeeded("auto");
   }, [isPoweredOn, requestServiceIfNeeded]);
 
+  // 伪计费逻辑：当正在服务时，每秒递增费用
+  useEffect(() => {
+    if (!roomState?.isServing || !roomState.speed) {
+      return;
+    }
+
+    const rate = FEE_RATES[roomState.speed] || FEE_RATES.MID;
+    const interval = window.setInterval(() => {
+      setDisplayedCurrentFee((prev) => prev + rate);
+      setDisplayedTotalFee((prev) => prev + rate);
+    }, 1000);
+
+    return () => window.clearInterval(interval);
+  }, [roomState?.isServing, roomState?.speed]);
+
   const current = roomState?.currentTemp ?? 25;
   const target = roomState?.targetTemp ?? targetInput;
   const tempDifference =
@@ -324,8 +379,9 @@ export function RoomControlPage() {
     | "SERVING"
     | "WAITING"
     | "IDLE";
-  const currentFee = roomState?.currentFee ?? 0;
-  const totalFee = roomState?.totalFee ?? 0;
+  // 使用显示的费用状态而不是 roomState 中的静态值
+  const currentFee = displayedCurrentFee;
+  const totalFee = displayedTotalFee;
 
   const statusItems = [
     {

@@ -11,6 +11,7 @@ from application.time_manager import TimeManager
 from domain.room import Room, RoomStatus
 from domain.queues import ServiceQueue, WaitingQueue
 from domain.service_object import ServiceObject, ServiceStatus, SPEED_PRIORITY
+from infrastructure.socketio_manager import push_room_state, push_system_event
 
 if TYPE_CHECKING:
     from application.billing_service import BillingService
@@ -139,17 +140,30 @@ class Scheduler:
             self.waiting_queue.remove(waiting_room_id)
         waiting_service.cancel_timer()
         self.assign_service(waiting_service)
+        
+        # 推送状态更新给前端
+        await push_room_state(victim.room_id)
+        await push_room_state(waiting_room_id)
+        await push_system_event("rotation", waiting_room_id, f"房间 {waiting_room_id} 开始服务，房间 {victim.room_id} 进入等待")
 
     async def _handle_temperature_reached(self, event: SchedulerEvent) -> None:
         """处理温度达标事件"""
         print(f"[Scheduler] Temperature reached for room {event.room_id}")
         self.release_service(event.room_id)
+        
+        # 推送状态更新给前端
+        await push_room_state(event.room_id)
+        await push_system_event("target_reached", event.room_id, f"房间 {event.room_id} 达到目标温度")
 
     async def _handle_auto_restart(self, event: SchedulerEvent) -> None:
         """处理自动重启事件"""
         speed = event.payload.get("speed", "MID") if event.payload else "MID"
         print(f"[Scheduler] Auto restart for room {event.room_id} with speed {speed}")
         self.on_new_request(event.room_id, speed)
+        
+        # 推送状态更新给前端
+        await push_room_state(event.room_id)
+        await push_system_event("auto_restart", event.room_id, f"房间 {event.room_id} 自动重启送风")
 
     # ================== Public API ==================
     def on_new_request(self, room_id: str, speed: str) -> None:

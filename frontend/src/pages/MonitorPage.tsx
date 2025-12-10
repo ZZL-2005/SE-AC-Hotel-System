@@ -4,6 +4,7 @@ import { adminClient } from "../api/adminClient";
 import type { HyperParamSettings, HyperParamUpdatePayload } from "../api/adminClient";
 import { monitorClient } from "../api/monitorClient";
 import type { RoomStatus } from "../types/rooms";
+import { getSocket, subscribeMonitor, unsubscribeMonitor } from "../api/socket";
 
 // 事件日志类型
 interface SystemEvent {
@@ -255,12 +256,57 @@ export function MonitorPage() {
     };
     loadRoomsRef.current = load;
     load();
+    
+    // 订阅监控面板更新（Socket.IO）
+    const socket = getSocket();
+    subscribeMonitor();
+    
+    // 处理单个房间状态更新
+    const handleRoomState = (state: RoomStatus) => {
+      setRooms(prev => {
+        const idx = prev.findIndex(r => r.roomId === state.roomId);
+        if (idx === -1) return prev;
+        const updated = [...prev];
+        updated[idx] = { ...updated[idx], ...state };
+        return updated;
+      });
+      setLastUpdated(new Date());
+    };
+    
+    // 处理批量房间状态更新
+    const handleMonitorUpdate = (data: { rooms: RoomStatus[] }) => {
+      setRooms(data.rooms);
+      setLastUpdated(new Date());
+    };
+    
+    // 处理系统事件
+    const handleSystemEvent = (event: { id: string; time: number; type: string; roomId: string; message: string }) => {
+      const newEvent: SystemEvent = {
+        id: event.id,
+        time: new Date(event.time),
+        type: event.type as SystemEvent["type"],
+        roomId: event.roomId,
+        message: event.message,
+      };
+      setSystemEvents(prev => [newEvent, ...prev].slice(0, 50));
+    };
+    
+    socket.on("room_state", handleRoomState);
+    socket.on("monitor_update", handleMonitorUpdate);
+    socket.on("system_event", handleSystemEvent);
+    
+    // 保留一个较长间隔的备用轮询，防止 WebSocket 断开时无法更新
     const interval = window.setInterval(() => {
       loadRoomsRef.current?.();
-    }, 4000);
+    }, 30000);
+    
     return () => {
       cancelled = true;
       loadRoomsRef.current = null;
+      socket.off("room_state", handleRoomState);
+      socket.off("monitor_update", handleMonitorUpdate);
+      socket.off("system_event", handleSystemEvent);
+      unsubscribeMonitor();
       window.clearInterval(interval);
     };
   }, []);

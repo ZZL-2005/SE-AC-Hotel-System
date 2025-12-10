@@ -6,4 +6,5 @@ export { SpeedSelector } from "./SpeedSelector";
 export { FeePanel } from "./FeePanel";
 export { BillsView } from "./BillsView";
 export { RoomStatusGrid } from "./RoomStatusGrid";
+export { ProtectedRoute } from "./ProtectedRoute";
 export type { RoomStatus } from "../types/rooms";
