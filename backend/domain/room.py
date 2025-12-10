@@ -117,13 +117,17 @@ class Room:
         return abs(self.current_temp - self.target_temp) >= threshold
 
     def _move_towards(self, target: float, delta_per_sec: float) -> bool:
-        """按给定步长向目标温度靠近，返回是否恰好到达目标。"""
+        """按给定步长向目标温度靠近，返回是否"刚刚"到达目标（不是已经在目标）。"""
         if delta_per_sec <= 0:
-            return abs(self.current_temp - target) < 1e-3
+            return False  # 无变化，不算"到达"
         difference = target - self.current_temp
+        # 如果已经在目标温度，返回 False（避免重复触发事件）
+        if abs(difference) < 1e-6:
+            return False
+        # 如果差距在一步之内，则到达目标
         if abs(difference) <= delta_per_sec:
             self.current_temp = target
-            return True
+            return True  # 刚刚到达
         step = delta_per_sec if difference > 0 else -delta_per_sec
         self.current_temp += step
         return False

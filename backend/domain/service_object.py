@@ -4,7 +4,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Optional, Tuple
+from typing import Optional, Tuple, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from application.timer_handle import TimerHandle
 
 
 class ServiceStatus(str, Enum):
@@ -23,14 +26,71 @@ class ServiceObject:
     room_id: str
     speed: str
     started_at: Optional[datetime] = None
-    served_seconds: int = 0
-    wait_seconds: int = 0
-    total_waited_seconds: int = 0
     priority_token: int = 0
     time_slice_enforced: bool = False
     status: ServiceStatus = ServiceStatus.WAITING
-    current_fee: float = 0.0
+    
+    # timer_id 用于持久化，恢复后通过 TimeManager 重新绑定 Handle
+    timer_id: Optional[str] = None
+    
+    # TimerHandle 实例（不持久化，运行时绑定）
+    _timer_handle: Optional["TimerHandle"] = field(default=None, repr=False)
 
+    # ================== 计时相关属性（通过 TimerHandle 查询）==================
+    @property
+    def served_seconds(self) -> int:
+        """服务时长（从 TimeManager 查询）"""
+        if self._timer_handle and self._timer_handle.is_valid:
+            return self._timer_handle.elapsed_seconds
+        return 0
+
+    @property
+    def wait_seconds(self) -> int:
+        """剩余等待时间（从 TimeManager 查询）"""
+        if self._timer_handle and self._timer_handle.is_valid:
+            return self._timer_handle.remaining_seconds
+        return 0
+
+    @property
+    def total_waited_seconds(self) -> int:
+        """累计等待时长（从 TimeManager 查询）"""
+        if self._timer_handle and self._timer_handle.is_valid:
+            return self._timer_handle.elapsed_seconds
+        return 0
+
+    @property
+    def current_fee(self) -> float:
+        """当前累计费用（从 TimeManager 查询）"""
+        if self._timer_handle and self._timer_handle.is_valid:
+            return self._timer_handle.current_fee
+        return 0.0
+
+    # ================== 计时任务管理 ==================
+    def attach_timer(self, handle: "TimerHandle") -> None:
+        """绑定计时任务句柄"""
+        self._timer_handle = handle
+        self.timer_id = handle.timer_id
+
+    def detach_timer(self) -> Optional["TimerHandle"]:
+        """解绑计时任务句柄"""
+        handle = self._timer_handle
+        self._timer_handle = None
+        # 保留 timer_id 用于持久化恢复
+        return handle
+
+    def cancel_timer(self) -> None:
+        """取消当前计时任务"""
+        if self._timer_handle:
+            self._timer_handle.cancel()
+            self._timer_handle = None
+        self.timer_id = None
+
+    @property
+    def has_timer(self) -> bool:
+        """是否有绑定的计时任务"""
+        return self._timer_handle is not None and self._timer_handle.is_valid
+
+    # ================== 优先级计算 ==================
     def priority_key(self) -> Tuple[int, int, int]:
         """
         返回优先级排序键，用于队列排序。

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import Optional, TYPE_CHECKING
 from uuid import uuid4
 
 from domain.room import RoomStatus
@@ -10,6 +10,7 @@ from domain.room import RoomStatus
 if TYPE_CHECKING:
     from app.config import AppConfig
     from application.billing_service import BillingService
+    from application.time_manager import TimeManager
     from application.use_ac_service import UseACService
     from infrastructure.repository import RoomRepository
 
@@ -17,15 +18,21 @@ if TYPE_CHECKING:
 class CheckOutService:
     def __init__(
         self,
-        config: AppConfig,
-        repository: RoomRepository,
-        billing_service: BillingService,
-        ac_service: UseACService,
+        config: "AppConfig",
+        repository: "RoomRepository",
+        billing_service: "BillingService",
+        ac_service: "UseACService",
+        time_manager: Optional["TimeManager"] = None,
     ):
         self.config = config
         self.repo = repository
         self.billing_service = billing_service
         self.ac_service = ac_service
+        self.time_manager = time_manager
+
+    def set_time_manager(self, time_manager: "TimeManager") -> None:
+        """设置时间管理器（后置注入）"""
+        self.time_manager = time_manager
 
     def _default_temperature(self) -> float:
         return float((self.config.temperature or {}).get("default_target", 25.0))
@@ -52,9 +59,24 @@ class CheckOutService:
 
         nights = order["nights"]
         deposit = order["deposit"]
+        
+        # 从 TimeManager 获取实际入住时长（如果有计时器）
+        accommodation_seconds = 0
+        timer_id = order.get("timer_id")
+        if timer_id and self.time_manager:
+            timer_handle = self.time_manager.get_timer_by_id(timer_id)
+            if timer_handle and timer_handle.is_valid:
+                accommodation_seconds = timer_handle.elapsed_seconds
+                timer_handle.cancel()
+        
+        # 如果有计时器数据，用实际时长计算天数（向上取整）
+        if accommodation_seconds > 0:
+            actual_nights = max(1, (accommodation_seconds + 86399) // 86400)  # 向上取整到天
+        else:
+            actual_nights = nights
 
         rate = self._accommodation_rate()
-        room_fee = float(nights) * rate
+        room_fee = float(actual_nights) * rate
         deposit = float(deposit)
 
         ac_bill = self.billing_service.aggregate_records_to_bill(room_id)
@@ -95,9 +117,10 @@ class CheckOutService:
             "accommodationBill": {
                 "billId": accommodation_bill_id,
                 "roomFee": room_fee,
-                "nights": nights,
+                "nights": actual_nights,
                 "ratePerNight": rate,
                 "deposit": deposit,
+                "accommodationSeconds": accommodation_seconds,
             },
             "acBill": ac_bill_data,
             "detailRecords": [

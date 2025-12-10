@@ -17,3 +17,4 @@ class ACDetailRecord:
     ended_at: Optional[datetime] = None
     rate_per_min: float = 0.0
     fee_value: float = 0.0
+    timer_id: Optional[str] = None  # 关联 TimeManager 计时器

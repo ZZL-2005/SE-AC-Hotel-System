@@ -1,14 +1,15 @@
 """Routers for front-desk workflows such as check-in/out."""
 from __future__ import annotations
 
-from typing import Any, Dict
+from datetime import datetime
+from typing import Any, Dict, Optional
+from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
+from sqlmodel import select
 
 from interfaces import deps
-<<<<<<< HEAD
-=======
 from domain.room import Room, RoomStatus
 from infrastructure.database import SessionLocal
 from infrastructure.models import (
@@ -22,7 +23,6 @@ repository = deps.repository
 billing_service = deps.billing_service
 scheduler = deps.scheduler
 ac_service = deps.ac_service
->>>>>>> main
 
 router = APIRouter(tags=["frontdesk"])
 
@@ -50,8 +50,6 @@ class CheckOutRequest(BaseModel):
     roomId: str = Field(..., alias="roomId")
 
 
-<<<<<<< HEAD
-=======
 def _default_temperature() -> float:
     return float((deps.settings.temperature or {}).get("default_target", 25.0))
 
@@ -79,7 +77,52 @@ def _get_or_create_room(room_id: str) -> Room:
     return new_room
 
 
->>>>>>> main
+def _remove_wait_entry(room_id: str) -> None:
+    """移除等待队列条目"""
+    with SessionLocal() as session:
+        model = session.get(WaitEntryModel, room_id)
+        if model:
+            session.delete(model)
+            session.commit()
+
+
+def _latest_accommodation_order(room_id: str) -> Optional[AccommodationOrderModel]:
+    """获取最新的入住订单"""
+    with SessionLocal() as session:
+        statement = (
+            select(AccommodationOrderModel)
+            .where(AccommodationOrderModel.room_id == room_id)
+            .order_by(AccommodationOrderModel.check_in_at.desc())
+        )
+        return session.exec(statement).first()
+
+
+def _serialize_ac_bill(ac_bill) -> Optional[Dict[str, Any]]:
+    """序列化空调账单"""
+    if not ac_bill:
+        return None
+    return {
+        "billId": ac_bill.bill_id,
+        "roomId": ac_bill.room_id,
+        "periodStart": ac_bill.period_start.isoformat(),
+        "periodEnd": ac_bill.period_end.isoformat(),
+        "totalFee": ac_bill.total_fee,
+    }
+
+
+def _serialize_detail(rec) -> Dict[str, Any]:
+    """序列化详单记录"""
+    return {
+        "recordId": rec.record_id,
+        "roomId": rec.room_id,
+        "speed": rec.speed,
+        "startedAt": rec.started_at.isoformat(),
+        "endedAt": rec.ended_at.isoformat() if rec.ended_at else None,
+        "ratePerMin": rec.rate_per_min,
+        "feeValue": rec.fee_value,
+    }
+
+
 @router.post("/checkin")
 def check_in(payload: CheckInRequest) -> Dict[str, Any]:
     """
@@ -97,15 +140,6 @@ def check_in(payload: CheckInRequest) -> Dict[str, Any]:
 
 @router.post("/checkout")
 def check_out(payload: CheckOutRequest) -> Dict[str, Any]:
-<<<<<<< HEAD
-    """
-    办理退房结账。
-    """
-    try:
-        return checkout_service.check_out(payload.roomId)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-=======
     room = repository.get_room(payload.roomId)
     if not room:
         raise HTTPException(status_code=404, detail="Room not found")
@@ -157,7 +191,6 @@ def check_out(payload: CheckOutRequest) -> Dict[str, Any]:
         "detailRecords": [_serialize_detail(rec) for rec in detail_records],
         "totalDue": total_due,
     }
->>>>>>> main
 
 
 @router.get("/rooms/{room_id}/bills")

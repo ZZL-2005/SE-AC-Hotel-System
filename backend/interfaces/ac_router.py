@@ -45,6 +45,28 @@ def _room_state(room_id: str) -> Dict[str, Any]:
             or 0.0
         )
 
+        # 从 TimeManager 获取实时计时数据
+        served_seconds = 0
+        current_fee = 0.0
+        waited_seconds = 0
+        
+        if service and service.timer_id:
+            timer_handle = deps.time_manager.get_timer_by_id(service.timer_id)
+            if timer_handle and timer_handle.is_valid:
+                served_seconds = timer_handle.elapsed_seconds
+                current_fee = timer_handle.current_fee
+            else:
+                served_seconds = service.served_seconds
+                current_fee = service.current_fee
+        elif service:
+            served_seconds = service.served_seconds
+            current_fee = service.current_fee
+        
+        if wait and wait.timer_id:
+            timer_handle = deps.time_manager.get_timer_by_id(wait.timer_id)
+            if timer_handle and timer_handle.is_valid:
+                waited_seconds = timer_handle.elapsed_seconds
+
         temp_cfg = deps.settings.temperature or {}
         return {
             "roomId": room.room_id,
@@ -54,8 +76,10 @@ def _room_state(room_id: str) -> Dict[str, Any]:
             "speed": room.speed,
             "isServing": bool(service),
             "isWaiting": bool(wait),
-            "currentFee": service.current_fee if service else 0.0,
+            "currentFee": current_fee,
             "totalFee": float(fee_row),
+            "servedSeconds": served_seconds,
+            "waitedSeconds": waited_seconds,
             "mode": room.mode,
             "manualPowerOff": room.manual_powered_off,
             "autoRestartThreshold": float(temp_cfg.get("auto_restart_threshold", 1.0)),

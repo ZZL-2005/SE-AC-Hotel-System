@@ -35,6 +35,7 @@ class ServiceObjectModel(SQLModel, table=True):
     time_slice_enforced: bool = False
     status: str = Field(default="WAITING")
     current_fee: float = 0.0
+    timer_id: Optional[str] = Field(default=None)  # 关联 TimeManager 计时器
 
 
 class WaitEntryModel(SQLModel, table=True):
@@ -45,6 +46,7 @@ class WaitEntryModel(SQLModel, table=True):
     priority_token: int = 0
     time_slice_enforced: bool = False  # 添加时间片轮转标记
     requested_at: datetime = Field(default_factory=datetime.utcnow)
+    timer_id: Optional[str] = Field(default=None)  # 关联 TimeManager 计时器
 
 
 class ACDetailRecordModel(SQLModel, table=True):
@@ -55,6 +57,7 @@ class ACDetailRecordModel(SQLModel, table=True):
     ended_at: Optional[datetime] = None
     rate_per_min: float = 0.0
     fee_value: float = 0.0
+    timer_id: Optional[str] = Field(default=None)  # 关联 TimeManager 计时器
 
 
 class ACBillModel(SQLModel, table=True):
@@ -72,6 +75,7 @@ class AccommodationOrderModel(SQLModel, table=True):
     nights: int
     deposit: float
     check_in_at: datetime
+    timer_id: Optional[str] = Field(default=None)  # 关联 TimeManager 入住计时器
 
 
 class AccommodationBillModel(SQLModel, table=True):

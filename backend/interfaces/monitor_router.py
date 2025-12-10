@@ -68,6 +68,22 @@ class UpdateHyperParamRequest(BaseModel):
     clockRatio: Optional[float] = Field(None, gt=0.01, le=200.0)
 
 
+class TickIntervalRequest(BaseModel):
+    interval: float = Field(..., gt=0.001, le=10.0, description="Tick 间隔（秒），0.1 = 10x 加速")
+
+
+class TickIntervalResponse(BaseModel):
+    interval: float = Field(..., description="当前 tick 间隔（秒）")
+    speedMultiplier: float = Field(..., description="相对正常速度的倍率（1.0 / interval）")
+
+
+class TimerStatsResponse(BaseModel):
+    totalTimers: int
+    byType: Dict[str, int]
+    tickInterval: float
+    pendingEvents: int
+
+
 @router.post("/rooms/open")
 def open_room(payload: OpenRoomRequest) -> Dict[str, Any]:
     """管理员自定义开房间，写入初始温度与房费。"""
@@ -112,7 +128,38 @@ def list_room_status() -> Dict[str, List[Dict[str, Any]]]:
     for room in rooms:
         service = service_map.get(room.room_id)
         wait = wait_map.get(room.room_id)
-        current_fee = service.current_fee if service else 0.0
+        
+        # 从 TimeManager 获取实时计时数据
+        served_seconds = 0
+        current_fee = 0.0
+        waited_seconds = 0
+        wait_remaining = 0
+        
+        if service and service.timer_id:
+            timer_handle = deps.time_manager.get_timer_by_id(service.timer_id)
+            if timer_handle and timer_handle.is_valid:
+                served_seconds = timer_handle.elapsed_seconds
+                current_fee = timer_handle.current_fee
+            else:
+                # 回退到数据库数据
+                served_seconds = service.served_seconds
+                current_fee = service.current_fee
+        elif service:
+            served_seconds = service.served_seconds
+            current_fee = service.current_fee
+        
+        if wait and wait.timer_id:
+            timer_handle = deps.time_manager.get_timer_by_id(wait.timer_id)
+            if timer_handle and timer_handle.is_valid:
+                waited_seconds = timer_handle.elapsed_seconds
+                wait_remaining = timer_handle.remaining_seconds
+            else:
+                waited_seconds = wait.total_waited_seconds
+                wait_remaining = wait.wait_seconds
+        elif wait:
+            waited_seconds = wait.total_waited_seconds
+            wait_remaining = wait.wait_seconds
+        
         total_fee = fee_map.get(room.room_id, 0.0)
         status = _derive_status(room, service, wait)
         results.append(
@@ -126,8 +173,9 @@ def list_room_status() -> Dict[str, List[Dict[str, Any]]]:
                 "isWaiting": bool(wait),
                 "currentFee": current_fee,
                 "totalFee": total_fee,
-                "servedSeconds": service.served_seconds if service else 0,
-                "waitedSeconds": wait.total_waited_seconds if wait else 0,
+                "servedSeconds": served_seconds,
+                "waitedSeconds": waited_seconds,
+                "waitRemaining": wait_remaining,
                 "serviceSpeed": service.speed if service else None,
                 "serviceStartedAt": service.started_at.isoformat() if service and service.started_at else None,
                 "waitSpeed": wait.speed if wait else None,
@@ -152,6 +200,63 @@ def update_hyper_params(payload: UpdateHyperParamRequest) -> HyperParamResponse:
         _write_config(raw)
         deps.reload_settings_from_disk()
     return _hyperparams_from_settings()
+
+
+# ================== Tick Interval API（时间加速控制）==================
+@router.get("/tick-interval", response_model=TickIntervalResponse)
+def get_tick_interval() -> TickIntervalResponse:
+    """
+    获取当前 tick 间隔。
+    
+    - interval: 实际调用间隔（秒）
+    - speedMultiplier: 相对正常速度的倍率
+    
+    示例：
+    - interval=1.0 → speedMultiplier=1.0（正常速度）
+    - interval=0.1 → speedMultiplier=10.0（10倍加速）
+    """
+    interval = deps.time_manager.get_tick_interval()
+    return TickIntervalResponse(
+        interval=interval,
+        speedMultiplier=1.0 / interval if interval > 0 else 1.0
+    )
+
+
+@router.put("/tick-interval", response_model=TickIntervalResponse)
+def set_tick_interval(payload: TickIntervalRequest) -> TickIntervalResponse:
+    """
+    设置 tick 间隔（用于时间加速）。
+    
+    - interval=1.0 → 正常速度（每秒推进 1 秒逻辑时间）
+    - interval=0.1 → 10x 加速（每 0.1 秒推进 1 秒逻辑时间）
+    - interval=0.01 → 100x 加速
+    
+    注意：过低的间隔可能导致 CPU 占用过高。
+    """
+    deps.time_manager.set_tick_interval(payload.interval)
+    interval = deps.time_manager.get_tick_interval()
+    return TickIntervalResponse(
+        interval=interval,
+        speedMultiplier=1.0 / interval if interval > 0 else 1.0
+    )
+
+
+@router.get("/timer-stats", response_model=TimerStatsResponse)
+def get_timer_stats() -> TimerStatsResponse:
+    """获取 TimeManager 计时器统计信息（调试用）。"""
+    stats = deps.time_manager.get_timer_stats()
+    return TimerStatsResponse(
+        totalTimers=stats["total_timers"],
+        byType=stats["by_type"],
+        tickInterval=stats["tick_interval"],
+        pendingEvents=stats["pending_events"]
+    )
+
+
+@router.get("/timers")
+def list_timers() -> Dict[str, List[Dict[str, Any]]]:
+    """列出所有活跃的计时器（调试用）。"""
+    return {"timers": deps.time_manager.list_timers()}
 
 
 def _derive_status(room: RoomModel, service, wait) -> str:
