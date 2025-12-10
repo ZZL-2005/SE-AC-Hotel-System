@@ -96,7 +96,7 @@ TIMELINE: Dict[int, List[Dict[str, Any]]] = {
         {"roomId": "3", "type": "power_on"},
     ],
     4: [
-        {"roomId": "3", "type": "change_temp", "payload": {"targetTemp": 25.0}},
+        {"roomId": "2", "type": "change_temp", "payload": {"targetTemp": 25.0}},
         {"roomId": "4", "type": "power_on"},
         {"roomId": "5", "type": "power_on"},
     ],
