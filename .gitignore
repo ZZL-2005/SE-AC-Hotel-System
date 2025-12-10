@@ -15,7 +15,7 @@ env/
 .env
 *.db
 *.sqlite3
-
+table/
 # Node / Frontend
 node_modules/
 npm-debug.log
