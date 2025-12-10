@@ -24,9 +24,11 @@ class Room:
     is_serving: bool = False
     ac_enabled: bool = False  # 空调是否被用户开启（用于控制自动重启）
     total_fee: float = 0.0
+    rate_per_night: float = 300.0
     active_service_id: Optional[str] = None
     last_temp_change_timestamp: Optional[datetime] = None
     pending_target_temp: Optional[float] = None
+    manual_powered_off: bool = False
     metadata: dict = field(default_factory=dict)
 
     def mark_occupied(self, initial_temp: Optional[float] = None) -> None:

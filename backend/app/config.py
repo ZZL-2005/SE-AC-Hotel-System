@@ -59,6 +59,10 @@ class AppConfig:
     def accommodation(self) -> Dict[str, Any]:
         return self.raw.get("accommodation", {})
 
+    @property
+    def clock(self) -> Dict[str, Any]:
+        return self.raw.get("clock", {})
+
 
 @lru_cache(maxsize=1)
 def get_settings(path: Path | None = None) -> AppConfig:

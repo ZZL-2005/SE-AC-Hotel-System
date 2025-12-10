@@ -18,9 +18,11 @@ class RoomModel(SQLModel, table=True):
     is_serving: bool = Field(default=False)
     ac_enabled: bool = Field(default=False)  # 空调是否被用户开启
     total_fee: float = Field(default=0.0)
+    rate_per_night: float = Field(default=300.0)
     active_service_id: Optional[str] = Field(default=None)
     last_temp_change_timestamp: Optional[datetime] = None
     pending_target_temp: Optional[float] = None
+    manual_powered_off: bool = Field(default=False)
 
 
 class ServiceObjectModel(SQLModel, table=True):
