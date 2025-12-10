@@ -84,5 +84,13 @@ class RoomRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def get_latest_accommodation_order(self, room_id: str) -> Optional[dict]:
+        raise NotImplementedError
+
+    @abstractmethod
     def add_accommodation_bill(self, bill: dict) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_latest_accommodation_bill(self, room_id: str) -> Optional[dict]:
         raise NotImplementedError

@@ -53,17 +53,22 @@ class SQLiteServiceQueue(ServiceQueue):
             session.commit()
 
     def _to_model(self, service: ServiceObject) -> ServiceObjectModel:
+        # 从 TimerHandle 获取实时数据（如果有绑定的话）
+        served_seconds = service.served_seconds
+        current_fee = service.current_fee
+        
         return ServiceObjectModel(
             room_id=service.room_id,
             speed=service.speed,
             started_at=service.started_at,
-            served_seconds=service.served_seconds,
+            served_seconds=served_seconds,
             wait_seconds=service.wait_seconds,
             total_waited_seconds=service.total_waited_seconds,
             priority_token=service.priority_token,
             time_slice_enforced=service.time_slice_enforced,
             status=service.status.value if isinstance(service.status, ServiceStatus) else service.status,
-            current_fee=service.current_fee,
+            current_fee=current_fee,
+            timer_id=service.timer_id,  # 持久化 timer_id
         )
 
     def _to_entity(self, model: ServiceObjectModel) -> ServiceObject:
@@ -71,13 +76,11 @@ class SQLiteServiceQueue(ServiceQueue):
             room_id=model.room_id,
             speed=model.speed,
             started_at=model.started_at,
-            served_seconds=model.served_seconds,
-            wait_seconds=model.wait_seconds,
-            total_waited_seconds=model.total_waited_seconds,
             priority_token=model.priority_token,
             time_slice_enforced=model.time_slice_enforced,
             status=ServiceStatus(model.status) if model.status else ServiceStatus.WAITING,
-            current_fee=model.current_fee,
+            timer_id=model.timer_id,  # 恢复 timer_id
+            # 注意：TimerHandle 需要在 Scheduler 恢复时重新绑定
         )
 
 
@@ -123,21 +126,27 @@ class SQLiteWaitingQueue(WaitingQueue):
             session.commit()
 
     def _to_model(self, service: ServiceObject) -> WaitEntryModel:
+        # 从 TimerHandle 获取实时数据（如果有绑定的话）
+        wait_seconds = service.wait_seconds
+        total_waited_seconds = service.total_waited_seconds
+        
         return WaitEntryModel(
             room_id=service.room_id,
             speed=service.speed,
-            wait_seconds=service.wait_seconds,
-            total_waited_seconds=service.total_waited_seconds,
+            wait_seconds=wait_seconds,
+            total_waited_seconds=total_waited_seconds,
             priority_token=service.priority_token,
+            time_slice_enforced=service.time_slice_enforced,
+            timer_id=service.timer_id,  # 持久化 timer_id
         )
 
     def _to_entity(self, model: WaitEntryModel) -> ServiceObject:
         return ServiceObject(
             room_id=model.room_id,
             speed=model.speed,
-            wait_seconds=model.wait_seconds,
-            total_waited_seconds=model.total_waited_seconds,
             priority_token=model.priority_token,
+            time_slice_enforced=model.time_slice_enforced,
             status=ServiceStatus.WAITING,
+            timer_id=model.timer_id,  # 恢复 timer_id
+            # 注意：TimerHandle 需要在 Scheduler 恢复时重新绑定
         )
-

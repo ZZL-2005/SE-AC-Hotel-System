@@ -26,6 +26,20 @@ class AppConfig:
         return str(self.raw.get("version", "v1"))
 
     @property
+    def storage(self) -> Dict[str, Any]:
+        return self.raw.get("storage", {})
+
+    @property
+    def database_backend(self) -> str:
+        """数据库后端: sqlite | memory"""
+        return str(self.storage.get("database", "sqlite"))
+
+    @property
+    def queue_backend(self) -> str:
+        """队列后端: sqlite | memory"""
+        return str(self.storage.get("queue", "sqlite"))
+
+    @property
     def temperature(self) -> Dict[str, Any]:
         return self.raw.get("temperature", {})
 

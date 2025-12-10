@@ -118,6 +118,7 @@ class SQLiteRoomRepository(RoomRepository):
                 ended_at=record.ended_at,
                 rate_per_min=record.rate_per_min,
                 fee_value=record.fee_value,
+                timer_id=record.timer_id,
             )
             session.add(model)
 
@@ -131,6 +132,7 @@ class SQLiteRoomRepository(RoomRepository):
             model.ended_at = record.ended_at
             model.rate_per_min = record.rate_per_min
             model.fee_value = record.fee_value
+            model.timer_id = record.timer_id
             session.add(model)
 
     def get_active_detail_record(self, room_id: str) -> Optional[ACDetailRecord]:
@@ -200,8 +202,29 @@ class SQLiteRoomRepository(RoomRepository):
                     nights=order["nights"],
                     deposit=order["deposit"],
                     check_in_at=order["check_in_at"],
+                    timer_id=order.get("timer_id"),
                 )
             )
+
+    def get_latest_accommodation_order(self, room_id: str) -> Optional[dict]:
+        with SessionLocal() as session:
+            statement = (
+                select(AccommodationOrderModel)
+                .where(AccommodationOrderModel.room_id == room_id)
+                .order_by(AccommodationOrderModel.check_in_at.desc())
+            )
+            model = session.exec(statement).first()
+            if not model:
+                return None
+            return {
+                "order_id": model.order_id,
+                "room_id": model.room_id,
+                "customer_name": model.customer_name,
+                "nights": model.nights,
+                "deposit": model.deposit,
+                "check_in_at": model.check_in_at,
+                "timer_id": model.timer_id,
+            }
 
     def add_accommodation_bill(self, bill: dict) -> None:
         with SessionLocal() as session, session.begin():
@@ -213,6 +236,23 @@ class SQLiteRoomRepository(RoomRepository):
                     created_at=bill["created_at"],
                 )
             )
+
+    def get_latest_accommodation_bill(self, room_id: str) -> Optional[dict]:
+        with SessionLocal() as session:
+            statement = (
+                select(AccommodationBillModel)
+                .where(AccommodationBillModel.room_id == room_id)
+                .order_by(AccommodationBillModel.created_at.desc())
+            )
+            model = session.exec(statement).first()
+            if not model:
+                return None
+            return {
+                "bill_id": model.bill_id,
+                "room_id": model.room_id,
+                "total_fee": model.total_fee,
+                "created_at": model.created_at,
+            }
 
     # Helpers --------------------------------------------------------------
     def _room_from_model(self, model: RoomModel) -> Room:
@@ -271,4 +311,5 @@ class SQLiteRoomRepository(RoomRepository):
             ended_at=model.ended_at,
             rate_per_min=model.rate_per_min,
             fee_value=model.fee_value,
+            timer_id=model.timer_id,
         )

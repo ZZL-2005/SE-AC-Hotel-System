@@ -75,12 +75,15 @@ class UseACService:
         room.mark_occupied(initial_temp=room.current_temp)
 
         temp_cfg = self.config.temperature or {}
-        # Always reset to global default when target_temp not provided
-        default_target = float(temp_cfg.get("default_target", room.target_temp))
+        # 优先使用传入的 target_temp，其次保留已设置的温度，最后使用配置默认值
+        if target_temp is not None:
+            room.target_temp = target_temp
+        elif room.target_temp is None:
+            room.target_temp = float(temp_cfg.get("default_target", 25.0))
+        # 否则保留 room.target_temp 不变
 
         room.mode = mode or room.mode or "cool"
         room.speed = speed or room.speed or "MID"
-        room.target_temp = target_temp if target_temp is not None else default_target
         room.is_serving = False
         room.manual_powered_off = False
 
@@ -107,7 +110,7 @@ class UseACService:
         room = self._ensure_room(room_id)
         room.is_serving = False
         room.status = RoomStatus.OCCUPIED
-        room.manual_powered_off = True
+        room.manual_powered_off = True  # 标记空调已关闭，阻止自动重启
         scheduler = self._ensure_scheduler()
         self.billing_service.close_current_detail_record(room_id, datetime.utcnow())
         self.repo.save_room(room)

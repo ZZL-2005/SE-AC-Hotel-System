@@ -22,31 +22,45 @@ app.add_middleware(
     allow_methods=["*"],  # 必须，解决 OPTIONS 问题
     allow_headers=["*"],
 )
+
+
 @app.get("/health", tags=["health"])
 def health_check() -> dict:
     """Expose a minimal health endpoint to help dev tooling."""
     return {"status": "ok", "configVersion": deps.settings.version}
 
 
-# Background scheduler ticker ----------------------------------------------
+# Background tasks ----------------------------------------------
 @app.on_event("startup")
-async def _start_scheduler_loop() -> None:  # pragma: no cover - runtime wiring
-    async def _loop():
+async def _start_background_tasks() -> None:  # pragma: no cover - runtime wiring
+    """启动后台任务：事件消费循环 + 时钟推进循环"""
+    
+    # 启动异步事件消费循环
+    await deps.event_bus.start()
+    
+    # 时钟推进循环（调用 TimeManager.tick()）
+    async def _clock_loop():
         while True:
-            deps.scheduler.tick_1s()
-            clock_cfg = deps.settings.clock or {}
-            ratio = float(clock_cfg.get("ratio", 1.0))
-            if ratio <= 0:
-                ratio = 1.0
-            await asyncio.sleep(max(0.01, 1.0 / ratio))
+            # 每次调用推进 1 秒逻辑时间
+            deps.time_manager.tick()
+            # 调用间隔由 TimeManager 控制（可通过 API 调整）
+            interval = deps.time_manager.get_tick_interval()
+            await asyncio.sleep(interval)
 
-    app.state._scheduler_task = asyncio.create_task(_loop())
+    app.state._clock_task = asyncio.create_task(_clock_loop())
+    print("[main] Background tasks started: EventBus + TimeManager clock")
 
 
 @app.on_event("shutdown")
-async def _stop_scheduler_loop() -> None:  # pragma: no cover - runtime wiring
-    task = getattr(app.state, "_scheduler_task", None)
-    if task:
-        task.cancel()
+async def _stop_background_tasks() -> None:  # pragma: no cover - runtime wiring
+    """停止后台任务"""
+    # 停止时钟循环
+    clock_task = getattr(app.state, "_clock_task", None)
+    if clock_task:
+        clock_task.cancel()
         with contextlib.suppress(Exception):
-            await task
+            await clock_task
+    
+    # 停止事件消费循环
+    await deps.event_bus.stop()
+    print("[main] Background tasks stopped")

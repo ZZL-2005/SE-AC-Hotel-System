@@ -81,5 +81,23 @@ class InMemoryRoomRepository(RoomRepository):
     def add_accommodation_order(self, order: dict) -> None:
         self._accommodation_orders.append(order)
 
+    def get_latest_accommodation_order(self, room_id: str) -> Optional[dict]:
+        # Filter by room_id
+        room_orders = [o for o in self._accommodation_orders if o["room_id"] == room_id]
+        # Sort by check_in_at descending (assuming order dict has check_in_at)
+        if not room_orders:
+            return None
+        # Assuming check_in_at is sortable (datetime)
+        room_orders.sort(key=lambda x: x["check_in_at"], reverse=True)
+        return room_orders[0]
+
     def add_accommodation_bill(self, bill: dict) -> None:
         self._accommodation_bills.append(bill)
+
+    def get_latest_accommodation_bill(self, room_id: str) -> Optional[dict]:
+        room_bills = [b for b in self._accommodation_bills if b["room_id"] == room_id]
+        if not room_bills:
+            return None
+        # Assuming created_at is sortable (datetime)
+        room_bills.sort(key=lambda x: x["created_at"], reverse=True)
+        return room_bills[0]

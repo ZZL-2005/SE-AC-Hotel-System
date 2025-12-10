@@ -1,0 +1,478 @@
+"""时间管理器 - 统一管理所有计时任务"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Callable, Dict, Iterable, Optional, Set, TYPE_CHECKING
+
+from app.config import AppConfig
+from application.events import AsyncEventBus, SchedulerEvent, EventType
+from application.timer_handle import TimerHandle, TimerType
+
+if TYPE_CHECKING:
+    from domain.room import Room
+    from infrastructure.repository import RoomRepository
+
+
+@dataclass
+class TimerState:
+    """计时器内部状态"""
+    timer_id: str
+    timer_type: TimerType
+    room_id: str
+    speed: Optional[str] = None
+    elapsed_seconds: int = 0
+    remaining_seconds: int = 0
+    current_fee: float = 0.0
+    time_slice_enforced: bool = False
+    active: bool = True
+
+
+@dataclass
+class TimeManager:
+    """
+    时间管理器 - 统一管理所有计时任务
+    
+    职责：
+    1. 管理服务计时器（SERVICE - 递增计时 + 计费）
+    2. 管理等待计时器（WAIT - 倒计时 + 时间片轮转）
+    3. 管理详单计时器（DETAIL - 记录空调使用时长）
+    4. 管理入住计时器（ACCOMMODATION - 记录入住时长）
+    5. 温度模拟与自动重启检测
+    6. 通过异步事件总线向 Scheduler 发送通知
+    """
+    config: AppConfig
+    event_bus: AsyncEventBus
+    
+    # 计时器存储
+    _timers: Dict[str, TimerState] = field(default_factory=dict)
+    _room_to_timer: Dict[str, Dict[TimerType, str]] = field(default_factory=dict)
+    
+    # tick 间隔（秒），用于控制时间流速
+    _tick_interval: float = 1.0
+    
+    # 计费回调（由外部注入，避免循环依赖）
+    _fee_callback: Optional[Callable[[str, str], float]] = None
+    
+    # 依赖注入
+    _room_lookup: Callable[[str], Optional["Room"]] = field(default=lambda room_id: None)
+    _iter_rooms: Callable[[], Iterable["Room"]] = field(default=lambda: [])
+    _save_room: Callable[["Room"], None] = field(default=lambda room: None)
+
+    def __post_init__(self) -> None:
+        self._reload_config()
+        # 初始化房间到计时器的映射
+        if not self._room_to_timer:
+            self._room_to_timer = {}
+
+    def _reload_config(self) -> None:
+        """从配置加载参数"""
+        temp_cfg = self.config.temperature or {}
+        self.auto_restart_threshold = float(temp_cfg.get("auto_restart_threshold", 1.0))
+        scheduling_cfg = self.config.scheduling or {}
+        self.time_slice_seconds = int(scheduling_cfg.get("time_slice_seconds", 60))
+        throttle_cfg = self.config.throttle or {}
+        self.throttle_ms = int(throttle_cfg.get("change_temp_ms", 1000))
+
+    def update_config(self, config: AppConfig) -> None:
+        """更新配置"""
+        self.config = config
+        self._reload_config()
+
+    # ================== 依赖注入 ==================
+    def set_fee_callback(self, callback: Callable[[str, str], float]) -> None:
+        """设置计费回调（room_id, speed -> fee_increment）"""
+        self._fee_callback = callback
+
+    def set_room_repository(self, repo: "RoomRepository") -> None:
+        """设置房间仓储"""
+        self._room_lookup = repo.get_room
+        self._iter_rooms = repo.list_rooms
+        self._save_room = repo.save_room
+
+    # ================== Tick 间隔控制 ==================
+    def set_tick_interval(self, seconds: float) -> None:
+        """
+        设置 tick 间隔（秒）
+        
+        - 1.0 = 正常速度（1秒调用1次，推进1秒）
+        - 0.1 = 10x 加速（0.1秒调用1次，推进1秒）
+        - 0.01 = 100x 加速
+        """
+        if seconds <= 0:
+            raise ValueError("tick_interval must be positive")
+        self._tick_interval = seconds
+
+    def get_tick_interval(self) -> float:
+        """获取当前 tick 间隔"""
+        return self._tick_interval
+
+    # ================== 计时器创建 API ==================
+    def create_service_timer(self, room_id: str, speed: str) -> TimerHandle:
+        """
+        创建服务计时器（SERVICE 类型）
+        
+        用于跟踪空调服务时长和费用累计
+        """
+        self._remove_timer_by_room(room_id, TimerType.SERVICE)
+        
+        handle = TimerHandle.create(TimerType.SERVICE, room_id, self)
+        state = TimerState(
+            timer_id=handle.timer_id,
+            timer_type=TimerType.SERVICE,
+            room_id=room_id,
+            speed=speed,
+            elapsed_seconds=0,
+            current_fee=0.0,
+            active=True
+        )
+        self._timers[handle.timer_id] = state
+        self._set_room_timer(room_id, TimerType.SERVICE, handle.timer_id)
+        return handle
+
+    def create_wait_timer(
+        self, 
+        room_id: str, 
+        speed: str,
+        wait_seconds: int,
+        time_slice_enforced: bool = False
+    ) -> TimerHandle:
+        """
+        创建等待计时器（WAIT 类型）
+        
+        用于时间片轮转倒计时
+        """
+        self._remove_timer_by_room(room_id, TimerType.WAIT)
+        
+        handle = TimerHandle.create(TimerType.WAIT, room_id, self)
+        state = TimerState(
+            timer_id=handle.timer_id,
+            timer_type=TimerType.WAIT,
+            room_id=room_id,
+            speed=speed,
+            elapsed_seconds=0,
+            remaining_seconds=wait_seconds,
+            time_slice_enforced=time_slice_enforced,
+            active=True
+        )
+        self._timers[handle.timer_id] = state
+        self._set_room_timer(room_id, TimerType.WAIT, handle.timer_id)
+        return handle
+
+    def create_detail_timer(self, room_id: str, speed: str) -> TimerHandle:
+        """
+        创建详单计时器（DETAIL 类型）
+        
+        用于记录空调详单的使用时长
+        """
+        # 详单计时器不移除旧的，因为可能有多个详单段
+        handle = TimerHandle.create(TimerType.DETAIL, room_id, self)
+        state = TimerState(
+            timer_id=handle.timer_id,
+            timer_type=TimerType.DETAIL,
+            room_id=room_id,
+            speed=speed,
+            elapsed_seconds=0,
+            current_fee=0.0,
+            active=True
+        )
+        self._timers[handle.timer_id] = state
+        self._set_room_timer(room_id, TimerType.DETAIL, handle.timer_id)
+        return handle
+
+    def create_accommodation_timer(self, room_id: str) -> TimerHandle:
+        """
+        创建入住计时器（ACCOMMODATION 类型）
+        
+        用于记录入住时长
+        """
+        self._remove_timer_by_room(room_id, TimerType.ACCOMMODATION)
+        
+        handle = TimerHandle.create(TimerType.ACCOMMODATION, room_id, self)
+        state = TimerState(
+            timer_id=handle.timer_id,
+            timer_type=TimerType.ACCOMMODATION,
+            room_id=room_id,
+            elapsed_seconds=0,
+            active=True
+        )
+        self._timers[handle.timer_id] = state
+        self._set_room_timer(room_id, TimerType.ACCOMMODATION, handle.timer_id)
+        return handle
+
+    # ================== 计时器恢复 API ==================
+    def get_timer_by_id(self, timer_id: str) -> Optional[TimerHandle]:
+        """
+        通过 timer_id 获取句柄（用于从持久化恢复）
+        """
+        state = self._timers.get(timer_id)
+        if not state or not state.active:
+            return None
+        return TimerHandle.restore(
+            timer_id=state.timer_id,
+            timer_type=state.timer_type,
+            room_id=state.room_id,
+            time_manager=self
+        )
+
+    def restore_timer(
+        self,
+        timer_id: str,
+        timer_type: TimerType,
+        room_id: str,
+        speed: Optional[str] = None,
+        elapsed_seconds: int = 0,
+        remaining_seconds: int = 0,
+        current_fee: float = 0.0,
+        time_slice_enforced: bool = False
+    ) -> TimerHandle:
+        """
+        从持久化数据恢复计时器状态
+        """
+        state = TimerState(
+            timer_id=timer_id,
+            timer_type=timer_type,
+            room_id=room_id,
+            speed=speed,
+            elapsed_seconds=elapsed_seconds,
+            remaining_seconds=remaining_seconds,
+            current_fee=current_fee,
+            time_slice_enforced=time_slice_enforced,
+            active=True
+        )
+        self._timers[timer_id] = state
+        self._set_room_timer(room_id, timer_type, timer_id)
+        return TimerHandle.restore(timer_id, timer_type, room_id, self)
+
+    # ================== 计时器查询 API ==================
+    def has_timer(self, timer_id: str) -> bool:
+        """检查计时器是否存在且有效"""
+        state = self._timers.get(timer_id)
+        return state is not None and state.active
+
+    def get_elapsed_seconds(self, timer_id: str) -> int:
+        """获取已经过的秒数"""
+        state = self._timers.get(timer_id)
+        return state.elapsed_seconds if state else 0
+
+    def get_remaining_seconds(self, timer_id: str) -> int:
+        """获取剩余秒数"""
+        state = self._timers.get(timer_id)
+        return state.remaining_seconds if state else 0
+
+    def get_current_fee(self, timer_id: str) -> float:
+        """获取当前累计费用"""
+        state = self._timers.get(timer_id)
+        return state.current_fee if state else 0.0
+
+    def get_timer_speed(self, timer_id: str) -> Optional[str]:
+        """获取计时器关联的风速"""
+        state = self._timers.get(timer_id)
+        return state.speed if state else None
+
+    def get_timer_state(self, timer_id: str) -> Optional[TimerState]:
+        """获取计时器完整状态（内部使用）"""
+        return self._timers.get(timer_id)
+
+    def cancel_timer(self, timer_id: str) -> None:
+        """取消计时器"""
+        state = self._timers.pop(timer_id, None)
+        if state:
+            self._remove_room_timer(state.room_id, state.timer_type)
+
+    # ================== 内部辅助方法 ==================
+    def _set_room_timer(self, room_id: str, timer_type: TimerType, timer_id: str) -> None:
+        """设置房间到计时器的映射"""
+        if room_id not in self._room_to_timer:
+            self._room_to_timer[room_id] = {}
+        self._room_to_timer[room_id][timer_type] = timer_id
+
+    def _remove_room_timer(self, room_id: str, timer_type: TimerType) -> None:
+        """移除房间到计时器的映射"""
+        if room_id in self._room_to_timer:
+            self._room_to_timer[room_id].pop(timer_type, None)
+
+    def _remove_timer_by_room(self, room_id: str, timer_type: TimerType) -> None:
+        """移除指定房间指定类型的计时器"""
+        if room_id in self._room_to_timer:
+            timer_id = self._room_to_timer[room_id].get(timer_type)
+            if timer_id:
+                self._timers.pop(timer_id, None)
+                self._room_to_timer[room_id].pop(timer_type, None)
+
+    def _get_active_service_rooms(self) -> Set[str]:
+        """获取所有正在服务的房间ID"""
+        return {
+            state.room_id 
+            for state in self._timers.values() 
+            if state.timer_type == TimerType.SERVICE and state.active
+        }
+
+    def _get_active_wait_rooms(self) -> Set[str]:
+        """获取所有等待中的房间ID"""
+        return {
+            state.room_id 
+            for state in self._timers.values() 
+            if state.timer_type == TimerType.WAIT and state.active
+        }
+
+    def _get_service_speeds(self) -> Set[str]:
+        """获取服务队列中的所有风速"""
+        return {
+            state.speed 
+            for state in self._timers.values() 
+            if state.timer_type == TimerType.SERVICE and state.active and state.speed
+        }
+
+    # ================== 时钟推进 ==================
+    def tick(self) -> None:
+        """
+        推进 1 秒逻辑时间
+        
+        调用间隔由 _tick_interval 控制，通过调整间隔实现时间加速
+        """
+        self._tick_service_timers()
+        self._tick_wait_timers()
+        self._tick_detail_timers()
+        self._tick_accommodation_timers()
+        self._tick_temperatures()
+        self._tick_throttle_windows()
+        self._check_auto_restart()
+
+    def _tick_service_timers(self) -> None:
+        """推进服务计时器"""
+        for timer_id, state in list(self._timers.items()):
+            if state.timer_type != TimerType.SERVICE or not state.active:
+                continue
+            
+            state.elapsed_seconds += 1
+            
+            # 注意：服务计时器不再负责计费回调，避免与详单计时器重复
+            # 费用累加由 _tick_detail_timers 处理
+            
+    def _tick_wait_timers(self) -> None:
+        """推进等待计时器"""
+        service_speeds = self._get_service_speeds()
+        
+        for timer_id, state in list(self._timers.items()):
+            if state.timer_type != TimerType.WAIT or not state.active:
+                continue
+            
+            state.elapsed_seconds += 1
+            
+            # 动态检测是否需要启用时间片轮转
+            if not state.time_slice_enforced and state.speed in service_speeds:
+                state.time_slice_enforced = True
+                state.remaining_seconds = self.time_slice_seconds
+            elif state.remaining_seconds > 0:
+                state.remaining_seconds -= 1
+            
+            # 时间片到期，发送事件
+            if state.remaining_seconds == 0 and state.time_slice_enforced:
+                self.event_bus.publish_sync(SchedulerEvent(
+                    event_type=EventType.TIME_SLICE_EXPIRED,
+                    room_id=state.room_id,
+                    payload={"speed": state.speed, "timer_id": timer_id}
+                ))
+
+    def _tick_detail_timers(self) -> None:
+        """推进详单计时器"""
+        for timer_id, state in list(self._timers.items()):
+            if state.timer_type != TimerType.DETAIL or not state.active:
+                continue
+            state.elapsed_seconds += 1
+            # 详单费用累加（如果需要）
+            if self._fee_callback and state.speed:
+                increment = self._fee_callback(state.room_id, state.speed)
+                state.current_fee += increment
+                
+                # 同步更新对应的 SERVICE 计时器（只更新内存状态，不写库）
+                # 这样 Scheduler 和监控接口能看到实时费用
+                service_timer_id = self._room_to_timer.get(state.room_id, {}).get(TimerType.SERVICE)
+                if service_timer_id:
+                    service_timer = self._timers.get(service_timer_id)
+                    if service_timer and service_timer.active:
+                        service_timer.current_fee += increment
+
+    def _tick_accommodation_timers(self) -> None:
+        """推进入住计时器"""
+        for timer_id, state in list(self._timers.items()):
+            if state.timer_type != TimerType.ACCOMMODATION or not state.active:
+                continue
+            state.elapsed_seconds += 1
+
+    def _tick_temperatures(self) -> None:
+        """推进温度模拟"""
+        temp_cfg = self.config.temperature or {}
+        active_rooms = self._get_active_service_rooms()
+        
+        for room in self._iter_rooms():
+            is_serving = room.room_id in active_rooms
+            reached = room.tick_temperature(temp_cfg, serving=is_serving)
+            self._save_room(room)
+            
+            # 达到目标温度，发送事件
+            if reached and is_serving:
+                self.event_bus.publish_sync(SchedulerEvent(
+                    event_type=EventType.TEMPERATURE_REACHED,
+                    room_id=room.room_id
+                ))
+
+    def _tick_throttle_windows(self) -> None:
+        """应用节流窗口"""
+        now = datetime.utcnow()
+        for room in self._iter_rooms():
+            room.apply_pending_target(now, self.throttle_ms)
+            self._save_room(room)
+
+    def _check_auto_restart(self) -> None:
+        """检查是否需要自动重启"""
+        from domain.room import RoomStatus
+        
+        active_rooms = self._get_active_service_rooms()
+        waiting_rooms = self._get_active_wait_rooms()
+        
+        for room in self._iter_rooms():
+            if room.status == RoomStatus.VACANT:
+                continue
+            if getattr(room, "manual_powered_off", False):
+                continue
+            if room.room_id in active_rooms or room.room_id in waiting_rooms:
+                continue
+            if room.needs_auto_restart(self.auto_restart_threshold):
+                self.event_bus.publish_sync(SchedulerEvent(
+                    event_type=EventType.AUTO_RESTART_NEEDED,
+                    room_id=room.room_id,
+                    payload={"speed": room.speed or "MID"}
+                ))
+
+    # ================== 调试接口 ==================
+    def get_timer_stats(self) -> dict:
+        """获取计时器统计信息（调试用）"""
+        type_counts = {}
+        for state in self._timers.values():
+            t = state.timer_type.value
+            type_counts[t] = type_counts.get(t, 0) + 1
+        return {
+            "total_timers": len(self._timers),
+            "by_type": type_counts,
+            "tick_interval": self._tick_interval,
+            "pending_events": self.event_bus.pending_count()
+        }
+
+    def list_timers(self) -> list:
+        """列出所有计时器（调试用）"""
+        return [
+            {
+                "timer_id": state.timer_id,
+                "type": state.timer_type.value,
+                "room_id": state.room_id,
+                "speed": state.speed,
+                "elapsed": state.elapsed_seconds,
+                "remaining": state.remaining_seconds,
+                "fee": state.current_fee,
+                "active": state.active
+            }
+            for state in self._timers.values()
+        ]
+
