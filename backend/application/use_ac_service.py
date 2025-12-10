@@ -75,12 +75,12 @@ class UseACService:
         room.mark_occupied(initial_temp=room.current_temp)
 
         temp_cfg = self.config.temperature or {}
-        # 优先使用传入的 target_temp，其次保留已设置的温度，最后使用配置默认值
+        default_target = float(temp_cfg.get("default_target", 25.0))
+        # 优先使用传入的 target_temp，否则每次开机都重置为配置的缺省温度
         if target_temp is not None:
             room.target_temp = target_temp
-        elif room.target_temp is None:
-            room.target_temp = float(temp_cfg.get("default_target", 25.0))
-        # 否则保留 room.target_temp 不变
+        else:
+            room.target_temp = default_target
 
         room.mode = mode or room.mode or "cool"
         room.speed = speed or room.speed or "MID"

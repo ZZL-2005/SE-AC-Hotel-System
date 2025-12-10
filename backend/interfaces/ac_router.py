@@ -108,6 +108,28 @@ def power_off(room_id: str) -> Dict[str, Any]:
 # ========== 3. Change Temperature ==========
 @router.post("/{room_id}/ac/change-temp")
 def change_temp(room_id: str, payload: ChangeTempRequest) -> Dict[str, Any]:
+    # 校验目标温度是否在配置的温度区间内；超出时不再报错，而是忽略本次请求并返回当前状态
+    temp_cfg = deps.settings.temperature or {}
+    cool_range = temp_cfg.get("cool_range") or []
+    heat_range = temp_cfg.get("heat_range") or []
+
+    with SessionLocal() as session:
+        room = session.get(RoomModel, room_id)
+        if not room:
+            raise HTTPException(status_code=404, detail="Room not found")
+        mode = (room.mode or "cool").lower()
+
+    allowed_min = None
+    allowed_max = None
+    if mode == "cool" and isinstance(cool_range, (list, tuple)) and len(cool_range) == 2:
+        allowed_min, allowed_max = float(cool_range[0]), float(cool_range[1])
+    elif mode == "heat" and isinstance(heat_range, (list, tuple)) and len(heat_range) == 2:
+        allowed_min, allowed_max = float(heat_range[0]), float(heat_range[1])
+
+    if allowed_min is not None and not (allowed_min <= payload.targetTemp <= allowed_max):
+        # 超出区间：保持目标温度不变，直接返回当前房间状态
+        return _room_state(room_id)
+
     deps.ac_service.change_temp(room_id, payload.targetTemp)
     return _room_state(room_id)
 

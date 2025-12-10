@@ -50,10 +50,10 @@ HYPERPARAM_OVERRIDES: Dict[str, float] = {
     "changeTempMs": 1000,
     "autoRestartThreshold": 1.0,
     # 温控：来自需求表格（制热 18-25℃、缺省 23℃、不同风速的升温速率）
-    "idleDriftPerMin": 0.3,
+    "idleDriftPerMin": 0.5,
     "midDeltaPerMin": 0.5,  # 1℃/2min
-    "highMultiplier": 1.2,  # -> 1℃/1min
-    "lowMultiplier": 0.8,  # -> 1℃/3min
+    "highMultiplier": 2,  # -> 1℃/1min
+    "lowMultiplier": 2/3,  # -> 1℃/3min
     "defaultTarget": 23.0,
     # 计费：1 元/1℃，不同风速对应每分钟单价
     "pricePerUnit": 1.0,
@@ -63,7 +63,7 @@ HYPERPARAM_OVERRIDES: Dict[str, float] = {
     # 住宿默认单价（单房自定义仍通过 open_room 设置）
     "ratePerNight": 150.0,
     # 时钟倍率：ratio=60 代表 1 分钟的业务时间约等于 1 秒真实时间
-    "clockRatio": 60.0,
+    "clockRatio": 10.0,
 }
 
 # ---------------------------------------------------------------------------
@@ -219,9 +219,11 @@ def main() -> None:
 
     defaults = fetch_hyperparams()
     applied = configure_hyperparams(defaults)
+    # 同步调整后端 TimeManager.tick 间隔，使 clockRatio 真正生效
+    configure_tick_interval(applied.get("clockRatio", 1.0))
     open_rooms(ROOM_PRESETS)
     check_in_rooms(ROOM_PRESETS)
-    simulate_timeline(applied["clockRatio"], max_minutes=args.max_minutes)
+    simulate_timeline_v2(applied["clockRatio"], max_minutes=args.max_minutes)
 
 
 def parse_args() -> argparse.Namespace:
@@ -357,6 +359,9 @@ def send_action(action: Dict[str, Any]) -> None:
 
     if action_type == "power_on":
         path = f"/rooms/{room_id}/ac/power-on"
+        # 默认以“制热模式”测试，如需制冷可在 TIMELINE 的 payload 中显式设置 mode
+        if "mode" not in payload:
+            payload["mode"] = "heat"
     elif action_type == "power_off":
         path = f"/rooms/{room_id}/ac/power-off"
     elif action_type == "change_temp":
@@ -431,6 +436,11 @@ def snapshot_rooms(minute: int) -> None:
                 "speed": r["speed"] or "",
                 "currentFee": float(r["currentFee"]),
                 "totalFee": float(r["totalFee"]),
+                # 队列信息在 Excel 中只需要按分钟展示，重复存一份在每个房间行里方便后处理
+                "servedSeconds": int(r.get("servedSeconds", 0)),
+                "waitedSeconds": int(r.get("waitedSeconds", 0)),
+                "isServing": bool(r.get("status") == "serving"),
+                "isWaiting": bool(r.get("status") == "waiting"),
             })
         CONSOLE.print(table)
 
@@ -443,13 +453,9 @@ def export_excel_snapshots(rows: List[Dict[str, Any]], filename: str = "snapshot
     ws = wb.active
     ws.title = "制热测试用例"
 
-    # styles
+    # styles（简化配色，只保留头部底色，数据区不再按状态上色）
     header_fill = PatternFill("solid", fgColor="FFF2CC")
     subheader_fill = PatternFill("solid", fgColor="FFF2CC")
-    serving_fill = PatternFill("solid", fgColor="C6EFCE")  # green
-    waiting_fill = PatternFill("solid", fgColor="FFEB9C")  # yellow
-    occupied_fill = PatternFill("solid", fgColor="BDD7EE") # blue
-    idle_fill = PatternFill("solid", fgColor="E2EFDA")     # light green
 
     # Build unique minutes and rooms
     minutes = sorted({r["minute"] for r in rows})
@@ -513,23 +519,27 @@ def export_excel_snapshots(rows: List[Dict[str, Any]], filename: str = "snapshot
     for m in minutes_full:
         ws.cell(row=current_row, column=1, value=m)
         col = 2
+        # 构建本分钟的队列字符串：房间ID/时间（秒），仅展示在一行的“服务队列/等待队列”列
+        minute_rows = [r for r in rows if r["minute"] == m]
+        serving_pairs = []
+        waiting_pairs = []
+        for r in minute_rows:
+            if r.get("isServing"):
+                serving_pairs.append(f"R{r['roomId']}/{int(r.get('servedSeconds', 0))}")
+            if r.get("isWaiting"):
+                waiting_pairs.append(f"R{r['roomId']}/{int(r.get('waitedSeconds', 0))}")
+        service_str = " ".join(sorted(serving_pairs)) if serving_pairs else ""
+        wait_str = " ".join(sorted(waiting_pairs)) if waiting_pairs else ""
+
         for room in rooms:
             r = data.get((m, room))
             if r:
                 ws.cell(row=current_row, column=col, value=round(r["currentTemp"], 1))
                 ws.cell(row=current_row, column=col + 1, value=round(r["targetTemp"], 1))
                 ws.cell(row=current_row, column=col + 2, value=r["speed"])
-                ws.cell(row=current_row, column=col + 3, value=round(r["currentFee"], 2))
-                status = str(r["status"]).lower()
-                fill = occupied_fill
-                if status == "serving":
-                    fill = serving_fill
-                elif status == "waiting":
-                    fill = waiting_fill
-                elif status == "idle":
-                    fill = idle_fill
+                # 费用列使用累计费用（totalFee）
+                ws.cell(row=current_row, column=col + 3, value=round(r["totalFee"], 2))
                 for c in range(col, col + 4):
-                    ws.cell(row=current_row, column=c).fill = fill
                     ws.cell(row=current_row, column=c).alignment = Alignment(horizontal="center")
                 last_by_room[room] = r
             else:
@@ -539,26 +549,17 @@ def export_excel_snapshots(rows: List[Dict[str, Any]], filename: str = "snapshot
                     ws.cell(row=current_row, column=col, value=round(lr["currentTemp"], 1))
                     ws.cell(row=current_row, column=col + 1, value=round(lr["targetTemp"], 1))
                     ws.cell(row=current_row, column=col + 2, value=lr["speed"])
-                    ws.cell(row=current_row, column=col + 3, value=round(lr["currentFee"], 2))
-                    status = str(lr["status"]).lower()
-                    fill = occupied_fill
-                    if status == "serving":
-                        fill = serving_fill
-                    elif status == "waiting":
-                        fill = waiting_fill
-                    elif status == "idle":
-                        fill = idle_fill
+                    ws.cell(row=current_row, column=col + 3, value=round(lr["totalFee"], 2))
                     for c in range(col, col + 4):
-                        ws.cell(row=current_row, column=c).fill = fill
                         ws.cell(row=current_row, column=c).alignment = Alignment(horizontal="center")
                 else:
                     for c in range(col, col + 4):
                         ws.cell(row=current_row, column=c, value=None)
                         ws.cell(row=current_row, column=c).alignment = Alignment(horizontal="center")
             col += 4
-        # queue columns placeholders (requires extra API to populate; leave empty)
-        ws.cell(row=current_row, column=len(rooms)*4 + 2, value="")
-        ws.cell(row=current_row, column=len(rooms)*4 + 3, value="")
+        # queue columns：使用当前分钟的服务/等待队列摘要
+        ws.cell(row=current_row, column=len(rooms)*4 + 2, value=service_str)
+        ws.cell(row=current_row, column=len(rooms)*4 + 3, value=wait_str)
         current_row += 1
 
     # auto-width (avoid MergedCell by using column index)
@@ -577,6 +578,64 @@ def export_excel_snapshots(rows: List[Dict[str, Any]], filename: str = "snapshot
         CONSOLE.print(f"[green]✔ Excel exported: {filename}[/]")
     except Exception as exc:
         CONSOLE.print(f"[red]Failed to write Excel: {exc}[/]")
+
+
+def configure_tick_interval(clock_ratio: float) -> None:
+    """根据 clockRatio 调整后端 tick 间隔，使时间加速与测试用例一致。"""
+    if clock_ratio <= 0:
+        return
+    # 时钟倍率 = 相对正常速度的倍数；interval 越小越快
+    interval = max(0.01, min(10.0, 1.0 / float(clock_ratio)))
+    if DRY_RUN:
+        CONSOLE.print(
+            Panel.fit(
+                f"[DRY] PUT {BASE_URL}/monitor/tick-interval\ninterval={interval}",
+                title="Dry Run",
+                border_style="magenta",
+            )
+        )
+        return
+    try:
+        resp = SESSION.put(f"{BASE_URL}/monitor/tick-interval", json={"interval": interval}, timeout=5)
+        resp.raise_for_status()
+        body = resp.json()
+        t = Table(title="Tick Interval", box=box.SIMPLE, show_header=False)
+        t.add_row("interval", str(body.get("interval")))
+        t.add_row("speedMultiplier", str(body.get("speedMultiplier")))
+        CONSOLE.print(t)
+    except requests.RequestException as exc:
+        CONSOLE.print(f"[yellow]�?Failed to configure tick interval: {exc}[/]")
+
+
+def simulate_timeline_v2(clock_ratio: float, max_minutes: Optional[int] = None) -> None:
+    """改进版：每分钟都抓快照，并将 clockRatio 视为“每分钟业务时间”的倍率。"""
+    minute_step = 60.0 / max(clock_ratio, 0.01)
+    max_minute = max(TIMELINE.keys(), default=0)
+    if max_minutes is not None:
+        max_minute = min(max_minute, max_minutes)
+    CONSOLE.print(
+        Panel.fit(
+            f"minutes={max_minute}\\nclockRatio={clock_ratio}",
+            title="Starting Timeline v2",
+            border_style="cyan",
+        )
+    )
+
+    # 基线：操作前的 0 分钟状态
+    snapshot_rooms(0)
+
+    for minute in range(1, max_minute + 1):
+        actions = TIMELINE.get(minute, [])
+        if actions:
+            CONSOLE.print(Panel.fit(f"Minute {minute}", border_style="blue"))
+            for action in actions:
+                send_action(action)
+        if not DRY_RUN:
+            time.sleep(minute_step)
+        snapshot_rooms(minute)
+
+    CONSOLE.print("[green]�?Timeline v2 replay finished[/]")
+    export_excel_snapshots(SNAPSHOT_ROWS)
 
 
 if __name__ == "__main__":
