@@ -55,7 +55,6 @@ class SQLiteRoomRepository(RoomRepository):
                 model.mode = room.mode
                 model.speed = room.speed
                 model.is_serving = room.is_serving
-                model.ac_enabled = room.ac_enabled
                 model.total_fee = room.total_fee
                 model.rate_per_night = room.rate_per_night
                 model.active_service_id = room.active_service_id
@@ -262,7 +261,6 @@ class SQLiteRoomRepository(RoomRepository):
             mode=model.mode,
             speed=model.speed,
             is_serving=model.is_serving,
-            ac_enabled=model.ac_enabled,
             total_fee=model.total_fee,
             rate_per_night=model.rate_per_night,
             active_service_id=model.active_service_id,

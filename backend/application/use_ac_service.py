@@ -106,9 +106,8 @@ class UseACService:
     def power_off(self, room_id: str) -> None:
         room = self._ensure_room(room_id)
         room.is_serving = False
-        room.ac_enabled = False  # 标记空调已关闭，阻止自动重启
         room.status = RoomStatus.OCCUPIED
-        room.manual_powered_off = True
+        room.manual_powered_off = True  # 标记空调已关闭，阻止自动重启
         scheduler = self._ensure_scheduler()
         self.billing_service.close_current_detail_record(room_id, datetime.utcnow())
         self.repo.save_room(room)
