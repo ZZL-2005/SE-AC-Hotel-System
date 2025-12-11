@@ -128,7 +128,7 @@ class TimeManager:
         return self._tick_interval
 
     # ================== 计时器创建 API ==================
-    def create_service_timer(self, room_id: str, speed: str) -> TimerHandle:
+    def create_service_timer(self, room_id: str, speed: str, initial_elapsed: int = 0) -> TimerHandle:
         """
         创建服务计时器（SERVICE 类型）
         
@@ -142,7 +142,7 @@ class TimeManager:
             timer_type=TimerType.SERVICE,
             room_id=room_id,
             speed=speed,
-            elapsed_seconds=0,
+            elapsed_seconds=int(initial_elapsed or 0),
             current_fee=0.0,
             active=True
         )
@@ -403,29 +403,45 @@ class TimeManager:
             # 费用累加由 _tick_detail_timers 处理
             
     def _tick_wait_timers(self) -> None:
-        """推进等待计时器"""
-        service_speeds = self._get_service_speeds()
-        
+        """
+        推进等待计时 + 时间片轮转调度触发。
+
+        业务语义：
+        - 等待中的每个房间独立累积等待时长 elapsed_seconds；
+        - 每等待满 `time_slice_seconds`（默认 120s），就触发一次
+          TIME_SLICE_EXPIRED 事件，让 Scheduler 尝试做轮转抢占；
+        - 如果当前没有合适的 victim（抢不到），则该房间继续等待，
+          再等下一个 120s 周期后再次触发事件。
+
+        因此这里把 remaining_seconds 视为“距离下一次尝试轮转的剩余时间”，
+        每次归零时发事件并重置一个新的周期。
+        """
+        if self.time_slice_seconds <= 0:
+            return
+
         for timer_id, state in list(self._timers.items()):
             if state.timer_type != TimerType.WAIT or not state.active:
                 continue
-            
+
             state.elapsed_seconds += 1
-            
-            # 动态检测是否需要启用时间片轮转
-            if not state.time_slice_enforced and state.speed in service_speeds:
-                state.time_slice_enforced = True
+
+            # 初始化 / 继续当前时间片倒计时
+            if state.remaining_seconds <= 0:
                 state.remaining_seconds = self.time_slice_seconds
-            elif state.remaining_seconds > 0:
-                state.remaining_seconds -= 1
-            
-            # 时间片到期，发送事件
-            if state.remaining_seconds == 0 and state.time_slice_enforced:
-                self.event_bus.publish_sync(SchedulerEvent(
-                    event_type=EventType.TIME_SLICE_EXPIRED,
-                    room_id=state.room_id,
-                    payload={"speed": state.speed, "timer_id": timer_id}
-                ))
+
+            state.remaining_seconds -= 1
+
+            # 等待满一个时间片：发送事件，并开启下一轮计时
+            if state.remaining_seconds <= 0:
+                self.event_bus.publish_sync(
+                    SchedulerEvent(
+                        event_type=EventType.TIME_SLICE_EXPIRED,
+                        room_id=state.room_id,
+                        payload={"speed": state.speed, "timer_id": timer_id},
+                    )
+                )
+                # 下一个 time_slice_seconds 再尝试一次
+                state.remaining_seconds = self.time_slice_seconds
 
     def _tick_detail_timers(self) -> None:
         """推进详单计时器"""
@@ -457,8 +473,13 @@ class TimeManager:
         """推进温度模拟"""
         temp_cfg = self.config.temperature or {}
         active_rooms = self._get_active_service_rooms()
+        waiting_rooms = self._get_active_wait_rooms()
         
         for room in self._iter_rooms():
+            # 等待队列中的房间（WAIT 计时器存在）暂不推进温度，
+            # 视为在“排队等待服务”阶段，温度保持不变。
+            if room.room_id in waiting_rooms:
+                continue
             is_serving = room.room_id in active_rooms
             reached = room.tick_temperature(temp_cfg, serving=is_serving)
             self._save_room(room)

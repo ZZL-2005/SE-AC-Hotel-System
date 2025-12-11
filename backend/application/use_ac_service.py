@@ -97,22 +97,43 @@ class UseACService:
         speed: Optional[str] = None,
     ) -> None:
         room = self._ensure_room(room_id)
-        room.mark_occupied(initial_temp=room.current_temp)
+        # 仅标记为已入住，不再重置 initial_temp，保持环境温度稳定用于回温
+        room.mark_occupied()
 
         temp_cfg = self.config.temperature or {}
-        
+
+        # 如果是从“手动关机”状态重新开机，则视为一次全新的开机，
+        # 不沿用之前的目标温度达标状态和风速。
+        was_manual_off = getattr(room, "manual_powered_off", False)
+        if was_manual_off:
+            # 清除上一控温周期的“已达标”标记（如果有）
+            if isinstance(getattr(room, "metadata", None), dict):
+                room.metadata.pop("has_reached_target", None)
+
         # 确定模式
         room.mode = mode or room.mode or "cool"
-        
-        # 优先使用传入的 target_temp，其次保留已设置的温度，最后使用配置默认值
+
+        # 目标温度策略：
+        # - 如果调用方明确传入 target_temp，则在合法范围内使用该值；
+        # - 否则无条件回落到配置的 default_target，而不是沿用旧的目标温度。
         if target_temp is not None:
             self._validate_target_temp(target_temp, room.mode)
             room.target_temp = target_temp
-        elif room.target_temp is None:
+        else:
             room.target_temp = float(temp_cfg.get("default_target", 25.0))
-        # 否则保留 room.target_temp 不变
 
-        room.speed = speed or room.speed or "MID"
+        # 风速策略：
+        # - 如果调用方显式给了 speed，则按传入值；
+        # - 否则如果是从手动关机恢复，则回落到默认风速 MID；
+        # - 其他情况沿用房间当前风速（首次开机时会回落到 MID）。
+        if speed is not None:
+            room.speed = speed
+        else:
+            if was_manual_off:
+                room.speed = "MID"
+            else:
+                room.speed = room.speed or "MID"
+
         room.is_serving = False
         room.manual_powered_off = False
 

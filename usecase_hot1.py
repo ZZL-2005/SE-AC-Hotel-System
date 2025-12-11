@@ -50,10 +50,6 @@ HYPERPARAM_OVERRIDES: Dict[str, float] = {
     "changeTempMs": 1000,
     "autoRestartThreshold": 1.0,
     # 温控：来自需求表格（制热 18-25℃、缺省 23℃、不同风速的升温速率）
-    "coolRangeMin": 18.0,
-    "coolRangeMax": 28.0,
-    "heatRangeMin": 18.0,
-    "heatRangeMax": 25.0,
     "idleDriftPerMin": 0.5,
     "midDeltaPerMin": 0.5,  # 1℃/2min
     "highMultiplier": 2,  # -> 1℃/1min
@@ -67,7 +63,7 @@ HYPERPARAM_OVERRIDES: Dict[str, float] = {
     # 住宿默认单价（单房自定义仍通过 open_room 设置）
     "ratePerNight": 150.0,
     # 时钟倍率：ratio=60 代表 1 分钟的业务时间约等于 1 秒真实时间
-    "clockRatio": 60.0,
+    "clockRatio": 10.0,
 }
 
 # ---------------------------------------------------------------------------
@@ -100,7 +96,7 @@ TIMELINE: Dict[int, List[Dict[str, Any]]] = {
         {"roomId": "3", "type": "power_on"},
     ],
     4: [
-        {"roomId": "3", "type": "change_temp", "payload": {"targetTemp": 25.0}},
+        {"roomId": "2", "type": "change_temp", "payload": {"targetTemp": 25.0}},
         {"roomId": "4", "type": "power_on"},
         {"roomId": "5", "type": "power_on"},
     ],
@@ -223,14 +219,11 @@ def main() -> None:
 
     defaults = fetch_hyperparams()
     applied = configure_hyperparams(defaults)
-    
-    # 同步 tick_interval，确保后端时间推进与测试脚本一致
-    clock_ratio = applied.get("clockRatio", 1.0)
-    configure_tick_interval(clock_ratio)
-    
+    # 同步调整后端 TimeManager.tick 间隔，使 clockRatio 真正生效
+    configure_tick_interval(applied.get("clockRatio", 1.0))
     open_rooms(ROOM_PRESETS)
     check_in_rooms(ROOM_PRESETS)
-    simulate_timeline(clock_ratio, max_minutes=args.max_minutes)
+    simulate_timeline_v2(applied["clockRatio"], max_minutes=args.max_minutes)
 
 
 def parse_args() -> argparse.Namespace:
@@ -298,33 +291,6 @@ def configure_hyperparams(defaults: Dict[str, Any]) -> Dict[str, Any]:
     return applied
 
 
-def configure_tick_interval(clock_ratio: float) -> None:
-    """根据 clockRatio 调整后端 tick 间隔，使时间加速与测试用例一致。"""
-    if clock_ratio <= 0:
-        return
-    # 时钟倍率 = 相对正常速度的倍数；interval 越小越快
-    interval = max(0.01, min(10.0, 1.0 / float(clock_ratio)))
-    if DRY_RUN:
-        CONSOLE.print(
-            Panel.fit(
-                f"[DRY] PUT {BASE_URL}/monitor/tick-interval\ninterval={interval}",
-                title="Dry Run",
-                border_style="magenta",
-            )
-        )
-        return
-    try:
-        resp = SESSION.put(f"{BASE_URL}/monitor/tick-interval", json={"interval": interval}, timeout=5)
-        resp.raise_for_status()
-        body = resp.json()
-        t = Table(title="Tick Interval", box=box.SIMPLE, show_header=False)
-        t.add_row("interval", str(body.get("interval")))
-        t.add_row("speedMultiplier", str(body.get("speedMultiplier")))
-        CONSOLE.print(t)
-    except requests.RequestException as exc:
-        CONSOLE.print(f"[yellow]⚠ Failed to configure tick interval: {exc}[/]")
-
-
 def open_rooms(presets: Iterable[Dict[str, Any]]) -> None:
     for room in presets:
         if DRY_RUN:
@@ -370,71 +336,17 @@ def simulate_timeline(clock_ratio: float, max_minutes: Optional[int] = None) -> 
     max_minute = max(TIMELINE.keys(), default=0)
     if max_minutes is not None:
         max_minute = min(max_minute, max_minutes)
-    
-    CONSOLE.print(Panel.fit(
-        f"minutes={max_minute}\nclockRatio={clock_ratio}\nminute_step={minute_step:.2f}s\nDRY_RUN={DRY_RUN}", 
-        title="Starting Timeline", 
-        border_style="cyan"
-    ))
-
-    # 等待后端完全处理 tick_interval 配置后再开始
-    if not DRY_RUN:
-        CONSOLE.print("[yellow]等待 2 秒让后端同步 tick_interval...[/]")
-        time.sleep(2)
-    else:
-        CONSOLE.print("[yellow]DRY_RUN 模式，跳过等待[/]")
+    CONSOLE.print(Panel.fit(f"minutes={max_minute}\nclockRatio={clock_ratio}", title="Starting Timeline", border_style="cyan"))
 
     for minute in range(0, max_minute + 1):
         actions = TIMELINE.get(minute, [])
-        
-        # 执行该分钟的操作
         if actions:
             CONSOLE.print(Panel.fit(f"Minute {minute}", border_style="blue"))
             for action in actions:
                 send_action(action)
-        else:
-            CONSOLE.print(f"[dim]Minute {minute}: No actions[/]")
-        
-        # 使用时钟同步+快照接口，每分钟都等待 60 个 tick 完成（1 分钟业务时间）并立即采集快照
+            snapshot_rooms(minute)
         if not DRY_RUN:
-            tick_interval = 60.0 / max(clock_ratio, 0.01) / 60  # 计算每个 tick 的时间
-            expected_time = 60 * tick_interval
-            # 超时时间设置为预期时间的 20 倍，确保即使 CPU 负载很高也不会超时
-            timeout = max(30.0, expected_time * 20)
-            
-            info_panel = Panel(
-                f"[cyan]分钟 {minute}: 等待 60 个 tick 完成并采集快照[/]\n"
-                f"预计耗时: [yellow]{expected_time:.2f}[/] 秒\n"
-                f"超时设置: [yellow]{timeout:.1f}[/] 秒\n"
-                f"DRY_RUN: [red]{DRY_RUN}[/]",
-                title="⏱️ Time Sync + Snapshot",
-                border_style="cyan"
-            )
-            CONSOLE.print(info_panel)
-            
-            # 只有在有操作或第 0 分钟时才采集快照
-            if actions or minute == 0:
-                if not wait_for_tick_and_snapshot(minute=minute, count=60, timeout=timeout):
-                    CONSOLE.print(Panel(
-                        "[red]⚠ 时钟同步超时，使用 sleep 备用方案[/]",
-                        border_style="red"
-                    ))
-                    time.sleep(minute_step)
-                    # 使用旧的快照接口作为备用
-                    snapshot_rooms(minute)
-            else:
-                # 没有操作时只等待，不采集快照
-                if not wait_for_tick_and_snapshot(minute=minute, count=60, timeout=timeout):
-                    CONSOLE.print(Panel(
-                        "[red]⚠ 时钟同步超时，使用 sleep 备用方案[/]",
-                        border_style="red"
-                    ))
-                    time.sleep(minute_step)
-        else:
-            CONSOLE.print(Panel(
-                f"[yellow]DRY_RUN 模式: 跳过 wait_for_tick_and_snapshot (minute={minute})[/]",
-                border_style="yellow"
-            ))
+            time.sleep(minute_step)
 
     CONSOLE.print("[green]✔ Timeline replay finished[/]")
     export_excel_snapshots(SNAPSHOT_ROWS)
@@ -447,6 +359,9 @@ def send_action(action: Dict[str, Any]) -> None:
 
     if action_type == "power_on":
         path = f"/rooms/{room_id}/ac/power-on"
+        # 默认以“制热模式”测试，如需制冷可在 TIMELINE 的 payload 中显式设置 mode
+        if "mode" not in payload:
+            payload["mode"] = "heat"
     elif action_type == "power_off":
         path = f"/rooms/{room_id}/ac/power-off"
     elif action_type == "change_temp":
@@ -459,138 +374,17 @@ def send_action(action: Dict[str, Any]) -> None:
     if DRY_RUN:
         CONSOLE.print(Panel.fit(f"[DRY] POST {BASE_URL}{path}", title="Dry Run", border_style="magenta"))
         return
-    
     try:
         resp = SESSION.post(f"{BASE_URL}{path}", json=payload if payload else None, timeout=5)
         resp.raise_for_status()
         body = resp.json()
-        t = Table(title=f"{action_type.upper()} → Room {room_id}", box=box.SIMPLE, show_header=False)
+        t = Table(title=f"{action_type.upper()}  Room {room_id}", box=box.SIMPLE, show_header=False)
         t.add_row("status", str(body.get("status")))
         t.add_row("isServing", str(body.get("isServing")))
         t.add_row("isWaiting", str(body.get("isWaiting")))
         CONSOLE.print(t)
-    except requests.HTTPError as e:
-        # 捕获 HTTP 错误（如 400 Bad Request），显示错误信息但不中断测试
-        error_detail = "Unknown error"
-        if e.response is not None:
-            try:
-                error_body = e.response.json()
-                error_detail = error_body.get("detail", str(e))
-            except:
-                error_detail = e.response.text or str(e)
-        
-        error_panel = Panel(
-            f"[red]❌ {action_type.upper()} → Room {room_id} FAILED[/]\n"
-            f"[yellow]{error_detail}[/]",
-            title="⚠️ Request Rejected",
-            border_style="red"
-        )
-        CONSOLE.print(error_panel)
-    except requests.RequestException as e:
-        # 捕获其他网络错误
-        error_panel = Panel(
-            f"[red]❌ {action_type.upper()} → Room {room_id} FAILED[/]\n"
-            f"[yellow]{str(e)}[/]",
-            title="⚠️ Network Error",
-            border_style="red"
-        )
-        CONSOLE.print(error_panel)
-
-
-def wait_for_tick_and_snapshot(minute: int, count: int = 1, timeout: float = 5.0) -> bool:
-    """
-    等待指定数量的 tick 完成并立即采集快照(原子操作)。
-
-    参数:
-    - minute: 当前分钟数(用于显示)
-    - count: 要等待的 tick 数量
-    - timeout: 总超时时间(秒)
-
-    返回 True 表示成功，False 表示超时。
-    """
-    if DRY_RUN:
-        CONSOLE.print(Panel.fit(
-            f"[DRY] POST {BASE_URL}/monitor/wait-tick-and-snapshot\ncount={count}, timeout={timeout:.1f}s",
-            title="Dry Run",
-            border_style="magenta"
-        ))
-        return True
-
-    try:
-        url = f"{BASE_URL}/monitor/wait-tick-and-snapshot"
-        params = {"count": count, "timeout": timeout}
-
-        # 使用 Rich Table 显示调用信息
-        t = Table(title="🕑 Waiting for Tick and Snapshot", box=box.SIMPLE, show_header=False)
-        t.add_row("URL", f"{url}")
-        t.add_row("count", str(count))
-        t.add_row("timeout", f"{timeout:.1f}s")
-        CONSOLE.print(t)
-
-        resp = SESSION.post(url, params=params, timeout=timeout + 1)
-        resp.raise_for_status()
-        result = resp.json()
-
-        success = result.get("success", False)
-        tick_counter = result.get("tickCounter", 0)
-        message = result.get("message", "")
-        snapshot = result.get("snapshot")
-
-        # 显示结果
-        result_table = Table(
-            title="✅ Tick Sync + Snapshot Result" if success else "⚠️ Tick Sync Failed",
-            box=box.SIMPLE,
-            show_header=False
-        )
-        result_table.add_row("success", str(success))
-        result_table.add_row("tickCounter", str(tick_counter))
-        result_table.add_row("message", message)
-        CONSOLE.print(result_table)
-
-        # 处理快照数据
-        if success and snapshot:
-            rooms = snapshot.get("rooms", [])
-            for room in rooms:
-                if room["roomId"] in SNAPSHOT_ROOMS:
-                        SNAPSHOT_ROWS.append({
-                        "minute": minute,
-                        "roomId": room["roomId"],
-                        "status": room["status"],
-                        "currentTemp": float(room["currentTemp"]),
-                        "targetTemp": float(room["targetTemp"]),
-                        "speed": room["speed"] or "",
-                        "currentFee": float(room.get("currentFee", 0.0)),
-                        "totalFee": float(room.get("totalFee", 0.0)),
-                        "servedSeconds": int(room.get("servedSeconds", 0)),
-                        "waitedSeconds": int(room.get("waitedSeconds", 0)),
-                        "isServing": bool(room.get("isServing")),
-                        "isWaiting": bool(room.get("isWaiting")),
-                    })
-
-            CONSOLE.print(f"[green]✔ Snapshot captured for minute {minute}[/]")
-
-        return success
-    except requests.HTTPError as exc:
-        if exc.response is not None and exc.response.status_code == 404:
-            CONSOLE.print(Panel(
-                f"[yellow]⚠ API not found: {url}[/]\nFalling back to sleep-based time progression.",
-                title="API Not Found",
-                border_style="yellow"
-            ))
-        else:
-            CONSOLE.print(Panel(
-                f"[red]⚠ Wait for tick and snapshot 调用失败:[/]\n{exc}",
-                title="Error",
-                border_style="red"
-            ))
-        return False
-    except requests.RequestException as exc:
-        CONSOLE.print(Panel(
-            f"[red]⚠ Wait for tick and snapshot 调用失败:[/]\n{exc}",
-            title="Error",
-            border_style="red"
-        ))
-        return False
+    except requests.exceptions.HTTPError as e:
+        CONSOLE.print(f"[yellow]⚠ Action failed (HTTPError) but continue: {e}[/]")
 
 
 def snapshot_rooms(minute: int) -> None:
@@ -605,7 +399,6 @@ def snapshot_rooms(minute: int) -> None:
         return
 
     rooms = resp.json().get("rooms", [])
-    # 将监控接口返回的队列信息一并采集（servedSeconds / waitedSeconds / isServing / isWaiting）
     summary = [
         {
             "roomId": room["roomId"],
@@ -613,12 +406,8 @@ def snapshot_rooms(minute: int) -> None:
             "currentTemp": room["currentTemp"],
             "targetTemp": room["targetTemp"],
             "speed": room["speed"],
-            "currentFee": round(room.get("currentFee", 0.0), 2),
-            "totalFee": round(room.get("totalFee", 0.0), 2),
-            "servedSeconds": int(room.get("servedSeconds", 0)),
-            "waitedSeconds": int(room.get("waitedSeconds", 0)),
-            "isServing": bool(room.get("isServing")),
-            "isWaiting": bool(room.get("isWaiting")),
+            "currentFee": round(room["currentFee"], 2),
+            "totalFee": round(room["totalFee"], 2),
         }
         for room in rooms
         if room["roomId"] in SNAPSHOT_ROOMS
@@ -640,7 +429,7 @@ def snapshot_rooms(minute: int) -> None:
                 f"¥{r['currentFee']:.2f}",
                 f"¥{r['totalFee']:.2f}",
             )
-            # accumulate raw rows for Excel export（连同队列统计信息）
+            # accumulate raw rows for Excel export
             SNAPSHOT_ROWS.append({
                 "minute": minute,
                 "roomId": r["roomId"],
@@ -650,10 +439,11 @@ def snapshot_rooms(minute: int) -> None:
                 "speed": r["speed"] or "",
                 "currentFee": float(r["currentFee"]),
                 "totalFee": float(r["totalFee"]),
+                # 队列信息在 Excel 中只需要按分钟展示，重复存一份在每个房间行里方便后处理
                 "servedSeconds": int(r.get("servedSeconds", 0)),
                 "waitedSeconds": int(r.get("waitedSeconds", 0)),
-                "isServing": bool(r.get("isServing")),
-                "isWaiting": bool(r.get("isWaiting")),
+                "isServing": bool(r.get("status") == "serving"),
+                "isWaiting": bool(r.get("status") == "waiting"),
             })
         CONSOLE.print(table)
 
@@ -793,5 +583,68 @@ def export_excel_snapshots(rows: List[Dict[str, Any]], filename: str = "snapshot
         CONSOLE.print(f"[red]Failed to write Excel: {exc}[/]")
 
 
+def configure_tick_interval(clock_ratio: float) -> None:
+    """根据 clockRatio 调整后端 tick 间隔，使时间加速与测试用例一致。"""
+    if clock_ratio <= 0:
+        return
+    # 时钟倍率 = 相对正常速度的倍数；interval 越小越快
+    interval = max(0.01, min(10.0, 1.0 / float(clock_ratio)))
+    if DRY_RUN:
+        CONSOLE.print(
+            Panel.fit(
+                f"[DRY] PUT {BASE_URL}/monitor/tick-interval\ninterval={interval}",
+                title="Dry Run",
+                border_style="magenta",
+            )
+        )
+        return
+    try:
+        resp = SESSION.put(f"{BASE_URL}/monitor/tick-interval", json={"interval": interval}, timeout=5)
+        resp.raise_for_status()
+        body = resp.json()
+        t = Table(title="Tick Interval", box=box.SIMPLE, show_header=False)
+        t.add_row("interval", str(body.get("interval")))
+        t.add_row("speedMultiplier", str(body.get("speedMultiplier")))
+        CONSOLE.print(t)
+    except requests.RequestException as exc:
+        CONSOLE.print(f"[yellow]�?Failed to configure tick interval: {exc}[/]")
+
+
+def simulate_timeline_v2(clock_ratio: float, max_minutes: Optional[int] = None) -> None:
+    """改进版：每分钟都抓快照，并将 clockRatio 视为“每分钟业务时间”的倍率。"""
+    minute_step = 60.0 / max(clock_ratio, 0.01)
+    max_minute = max(TIMELINE.keys(), default=0)
+    if max_minutes is not None:
+        max_minute = min(max_minute, max_minutes)
+    CONSOLE.print(
+        Panel.fit(
+            f"minutes={max_minute}\\nclockRatio={clock_ratio}",
+            title="Starting Timeline v2",
+            border_style="cyan",
+        )
+    )
+
+    # 基线：操作前的 0 分钟状态（time=0 行）
+    snapshot_rooms(0)
+
+    for minute in range(1, max_minute + 1):
+        actions = TIMELINE.get(minute, [])
+        # 先在该分钟“开头”执行所有操作
+        if actions:
+            CONSOLE.print(Panel.fit(f"Minute {minute}", border_style="blue"))
+            for action in actions:
+                send_action(action)
+        # 然后立刻抓快照：表示本分钟刚开始、操作已生效但尚未流逝这一分钟的状态
+        snapshot_rooms(minute)
+        # 最后推进 1 分钟业务时间（温度和费用在后台随时间变化）
+        if not DRY_RUN and minute < max_minute:
+            time.sleep(minute_step)
+
+    CONSOLE.print("[green]�?Timeline v2 replay finished[/]")
+    export_excel_snapshots(SNAPSHOT_ROWS)
+
+
 if __name__ == "__main__":
     main()
+
+

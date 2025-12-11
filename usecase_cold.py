@@ -58,7 +58,7 @@ HYPERPARAM_OVERRIDES: Dict[str, float] = {
     "midDeltaPerMin": 0.5,  # 1℃/2min
     "highMultiplier": 2,  # -> 1℃/1min
     "lowMultiplier": 2/3,  # -> 1℃/3min
-    "defaultTarget": 23.0,
+    "defaultTarget": 25.0,
     # 计费：1 元/1℃，不同风速对应每分钟单价
     "pricePerUnit": 1.0,
     "rateHighUnitPerMin": 1.0,
@@ -72,13 +72,14 @@ HYPERPARAM_OVERRIDES: Dict[str, float] = {
 
 # ---------------------------------------------------------------------------
 # 2) 房间初始化：来自「房间初始温度」表。可增删房间、修改初温和房价。
-ROOM_PRESETS: List[Dict[str, Any]] = [
-    {"roomId": "1", "initialTemp": 10.0, "ratePerNight": 100.0},
-    {"roomId": "2", "initialTemp": 15.0, "ratePerNight": 125.0},
-    {"roomId": "3", "initialTemp": 18.0, "ratePerNight": 150.0},
-    {"roomId": "4", "initialTemp": 12.0, "ratePerNight": 200.0},
-    {"roomId": "5", "initialTemp": 14.0, "ratePerNight": 100.0},
+ROOM_PRESETS = [
+    {"roomId": "1", "initialTemp": 30.0, "ratePerNight": 100.0},
+    {"roomId": "2", "initialTemp": 29.0, "ratePerNight": 125.0},
+    {"roomId": "3", "initialTemp": 31.0, "ratePerNight": 150.0},
+    {"roomId": "4", "initialTemp": 32.0, "ratePerNight": 200.0},
+    {"roomId": "5", "initialTemp": 30.0, "ratePerNight": 100.0},
 ]
+
 
 # ---------------------------------------------------------------------------
 # 3) 时间轴：根据 Excel 中每分钟的操作填写。以下内容由截图推断，可根据
@@ -88,71 +89,87 @@ ROOM_PRESETS: List[Dict[str, Any]] = [
 #      - power_off -> POST /rooms/{id}/ac/power-off
 #      - change_temp -> POST /rooms/{id}/ac/change-temp
 #      - change_speed -> POST /rooms/{id}/ac/change-speed
-TIMELINE: Dict[int, List[Dict[str, Any]]] = {
-    1: [
+TIMELINE = {
+    0: [
         {"roomId": "1", "type": "power_on"},
+    ],
+    1: [
+        {"roomId": "1", "type": "change_temp", "payload": {"targetTemp": 18}},
+        {"roomId": "2", "type": "power_on"},
+        {"roomId": "5", "type": "power_on"},
     ],
     2: [
-        {"roomId": "1", "type": "change_temp", "payload": {"targetTemp": 24.0}},
-        {"roomId": "2", "type": "power_on"}
-    ],
-    3: [
         {"roomId": "3", "type": "power_on"},
     ],
-    4: [
-        {"roomId": "2", "type": "change_temp", "payload": {"targetTemp": 25.0}},
+    3: [
+        {"roomId": "2", "type": "change_temp", "payload": {"targetTemp": 19}},
         {"roomId": "4", "type": "power_on"},
-        {"roomId": "5", "type": "power_on"},
+    ],
+    4: [
+        {"roomId": "5", "type": "change_temp", "payload": {"targetTemp": 22}},
     ],
     5: [
-        {"roomId":"3", "type": "change_temp", "payload": {"targetTemp": 28.0}},
-        {"roomId": "5", "type": "change_speed", "payload": {"speed": "HIGH"}},
-    ],
-    6: [
         {"roomId": "1", "type": "change_speed", "payload": {"speed": "HIGH"}},
     ],
-    8: [
-        {"roomId": "5", "type": "change_temp", "payload": {"targetTemp": 24.0}},
+    6: [
+        {"roomId": "2", "type": "power_off"},
     ],
-    10: [
-        {"roomId": "1", "type": "change_temp", "payload": {"targetTemp": 22.0}},
-        {"roomId": "4", "type": "change_temp", "payload": {"targetTemp": 21.0}},
+    7: [
+        {"roomId": "2", "type": "power_on"},
+        {"roomId": "5", "type": "change_speed", "payload": {"speed": "HIGH"}},
+    ],
+    9: [
+        {"roomId": "1", "type": "change_temp", "payload": {"targetTemp": 22}},
+        {"roomId": "4", "type": "change_temp", "payload": {"targetTemp": 18}},
         {"roomId": "4", "type": "change_speed", "payload": {"speed": "HIGH"}},
     ],
+    11: [
+        {"roomId": "3", "type": "change_temp", "payload": {"targetTemp": 22}},
+    ],
     12: [
-        {"roomId": "5", "type": "change_speed", "payload": {"speed": "MID"}},
+        {"roomId": "5", "type": "change_speed", "payload": {"speed": "LOW"}},
     ],
     13: [
-        {"roomId": "2", "type": "change_speed", "payload": {"speed": "HIGH"}},
+        {"roomId": "1", "type": "change_temp", "payload": {"targetTemp": 22}},
     ],
-    15: [
-        {"roomId": "1", "type": "power_off", "payload": {}},
+    14: [
+        {"roomId": "1", "type": "power_off"},
+        {"roomId": "3", "type": "change_temp", "payload": {"targetTemp": 24}},
         {"roomId": "3", "type": "change_speed", "payload": {"speed": "LOW"}},
     ],
+    15: [
+        {"roomId": "5", "type": "change_temp", "payload": {"targetTemp": 20}},
+        {"roomId": "5", "type": "change_speed", "payload": {"speed": "HIGH"}},
+    ],
+    16: [
+        {"roomId": "2", "type": "power_off"},
+    ],
     17: [
-        {"roomId": "5", "type": "power_off", "payload": {}},
+        {"roomId": "3", "type": "change_speed", "payload": {"speed": "HIGH"}},
     ],
     18: [
-         {"roomId": "3", "type": "change_speed", "payload": {"speed": "HIGH"}},
-    ],
-    19: [
         {"roomId": "1", "type": "power_on"},
-        {"roomId": "4", "type": "change_temp", "payload": {"targetTemp": 25.0}},
+        {"roomId": "4", "type": "change_temp", "payload": {"targetTemp": 20}},
         {"roomId": "4", "type": "change_speed", "payload": {"speed": "MID"}},
     ],
-    21: [
-        {"roomId": "2", "type": "change_temp", "payload": {"targetTemp": 26.0}},
-        {"roomId": "2", "type": "change_speed", "payload": {"speed": "MID"}},
-        {"roomId": "5", "type": "power_on"},
+    19: [
+        {"roomId": "2", "type": "power_on"},
+    ],
+    20: [
+        {"roomId": "5", "type": "change_temp", "payload": {"targetTemp": 25}},
+    ],
+    22: [
+        {"roomId": "3", "type": "power_off"},
+    ],
+    23: [
+        {"roomId": "5", "type": "power_off"},
+    ],
+    24: [
+        {"roomId": "1", "type": "power_off"},
     ],
     25: [
-        {"roomId": "1", "type": "power_off", "payload": {}},
-        {"roomId": "3", "type": "power_off", "payload": {}},
-        {"roomId": "5", "type": "power_off", "payload": {}},
-    ],
-    26: [
-        {"roomId": "2", "type": "power_off", "payload": {}},
-        {"roomId": "4", "type": "power_off", "payload": {}},
+        {"roomId": "2", "type": "power_off"},
+        {"roomId": "4", "type": "power_off"},
     ],
 }
 
