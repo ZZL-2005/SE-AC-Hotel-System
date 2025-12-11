@@ -395,7 +395,7 @@ def simulate_timeline(clock_ratio: float, max_minutes: Optional[int] = None) -> 
         else:
             CONSOLE.print(f"[dim]Minute {minute}: No actions[/]")
         
-        # 使用时钟同步+快照接口，每分钟都等待 60 个 tick 完成（1 分钟业务时间）并立即采集快照
+        # 使用时钟同步+快照接口，每分钟都等待 60 个 tick 完成（1 分钟业务时间）并在 tick 线程中立即采集快照
         if not DRY_RUN:
             tick_interval = 60.0 / max(clock_ratio, 0.01) / 60  # 计算每个 tick 的时间
             expected_time = 60 * tick_interval
@@ -403,11 +403,12 @@ def simulate_timeline(clock_ratio: float, max_minutes: Optional[int] = None) -> 
             timeout = max(30.0, expected_time * 20)
             
             info_panel = Panel(
-                f"[cyan]分钟 {minute}: 等待 60 个 tick 完成并采集快照[/]\n"
+                f"[cyan]分钟 {minute}: 等待 60 个 tick 完成并在 tick 线程中采集快照[/]\n"
                 f"预计耗时: [yellow]{expected_time:.2f}[/] 秒\n"
                 f"超时设置: [yellow]{timeout:.1f}[/] 秒\n"
+                f"机制: [green]Snapshot in tick thread (blocks tick)[/]\n"
                 f"DRY_RUN: [red]{DRY_RUN}[/]",
-                title="⏱️ Time Sync + Snapshot",
+                title="⏱️ Time Sync + Snapshot (Blocking)",
                 border_style="cyan"
             )
             CONSOLE.print(info_panel)
@@ -499,8 +500,16 @@ def send_action(action: Dict[str, Any]) -> None:
 
 def wait_for_tick_and_snapshot(minute: int, count: int = 1, timeout: float = 5.0) -> bool:
     """
+<<<<<<< HEAD
     等待指定数量的 tick 完成并立即采集快照(原子操作)。
 
+=======
+    等待指定数量的 tick 完成并在 tick 线程中立即采集快照(阻塞 tick)
+    
+    通过在 tick 线程中同步执行快照采集,确保快照时间戳与 tick 推进完全一致,
+    完全消除了异步等待和快照采集之间可能产生的额外 tick 导致的时间偏移。
+    
+>>>>>>> 2e46a1e9030c96dfa8be2834efd492908b15f231
     参数:
     - minute: 当前分钟数(用于显示)
     - count: 要等待的 tick 数量
@@ -521,10 +530,11 @@ def wait_for_tick_and_snapshot(minute: int, count: int = 1, timeout: float = 5.0
         params = {"count": count, "timeout": timeout}
 
         # 使用 Rich Table 显示调用信息
-        t = Table(title="🕑 Waiting for Tick and Snapshot", box=box.SIMPLE, show_header=False)
+        t = Table(title="🕑 Waiting for Tick + Snapshot (Blocking)", box=box.SIMPLE, show_header=False)
         t.add_row("URL", f"{url}")
         t.add_row("count", str(count))
         t.add_row("timeout", f"{timeout:.1f}s")
+        t.add_row("mechanism", "[cyan]Snapshot in tick thread (blocks next tick)[/]")
         CONSOLE.print(t)
 
         resp = SESSION.post(url, params=params, timeout=timeout + 1)
@@ -545,6 +555,8 @@ def wait_for_tick_and_snapshot(minute: int, count: int = 1, timeout: float = 5.0
         result_table.add_row("success", str(success))
         result_table.add_row("tickCounter", str(tick_counter))
         result_table.add_row("message", message)
+        if success:
+            result_table.add_row("mechanism", "[green]✓ Snapshot captured in tick thread[/]")
         CONSOLE.print(result_table)
 
         # 处理快照数据
