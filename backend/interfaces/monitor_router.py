@@ -91,6 +91,22 @@ class TickSyncResponse(BaseModel):
     message: str
 
 
+class TickSyncWithSnapshotResponse(BaseModel):
+    """时钟同步 + 快照响应模型"""
+    success: bool
+    tickCounter: int
+    message: str
+    snapshot: Optional[Dict[str, Any]] = None  # 房间快照数据
+
+
+class TickSyncWithSnapshotResponse(BaseModel):
+    """时钟同步 + 快照响应模型"""
+    success: bool
+    tickCounter: int
+    message: str
+    snapshot: Optional[Dict[str, Any]] = None  # 房间快照数据
+
+
 @router.post("/rooms/open")
 def open_room(payload: OpenRoomRequest) -> Dict[str, Any]:
     """管理员自定义开房间，写入初始温度与房费。"""
@@ -324,6 +340,128 @@ async def wait_for_tick(
         success=success,
         tickCounter=deps.time_manager.get_tick_counter(),
         message=f"Waited for {count} tick(s)" if success else "Timeout waiting for tick"
+    )
+
+
+@router.post("/wait-tick-and-snapshot", response_model=TickSyncWithSnapshotResponse)
+async def wait_for_tick_and_snapshot(
+    count: int = 1,
+    timeout: float = 5.0
+) -> TickSyncWithSnapshotResponse:
+    """
+    等待指定数量的 tick 完成,并立即采集房间快照(原子操作)
+    
+    此接口确保快照采集与 tick 推进完全同步,避免了 wait_for_tick + snapshot_rooms
+    之间可能产生的额外 tick 导致的时间偏移问题。
+    
+    参数:
+    - count: 要等待的 tick 数量(默认 1)
+    - timeout: 总超时时间(秒,默认 5)
+    
+    返回:
+    - success: 是否成功等待
+    - tickCounter: 当前 tick 计数
+    - message: 结果消息
+    - snapshot: 房间快照数据(与 GET /monitor/rooms 格式相同)
+    
+    用法示例:
+    ```python
+    # 发送操作
+    POST /rooms/1/ac/power-on
+    # 等待 60 个 tick 完成并立即采集快照(1 分钟业务时间)
+    POST /monitor/wait-tick-and-snapshot?count=60&timeout=30
+    ```
+    """
+    if count <= 0:
+        return TickSyncWithSnapshotResponse(
+            success=False,
+            tickCounter=deps.time_manager.get_tick_counter(),
+            message="count must be positive",
+            snapshot=None
+        )
+    
+    # 等待 tick 完成
+    if count == 1:
+        success = await deps.time_manager.wait_for_next_tick(timeout=timeout)
+    else:
+        success = await deps.time_manager.wait_for_ticks(count=count, timeout=timeout)
+    
+    # 立即采集快照(在同一个异步上下文中,确保原子性)
+    snapshot_data = None
+    if success:
+        # 复用 list_room_status 的逻辑
+        with SessionLocal() as session:
+            rooms = session.exec(select(RoomModel)).all()
+            service_models = session.exec(select(ServiceObjectModel)).all()
+            wait_models = session.exec(select(WaitEntryModel)).all()
+            fee_map = _detail_fee_map_since_checkin(session)
+        
+        service_map = {model.room_id: model for model in service_models}
+        wait_map = {model.room_id: model for model in wait_models}
+        
+        results: List[Dict[str, Any]] = []
+        for room in rooms:
+            service = service_map.get(room.room_id)
+            wait = wait_map.get(room.room_id)
+            
+            # 从 TimeManager 获取实时计时数据
+            served_seconds = 0
+            current_fee = 0.0
+            waited_seconds = 0
+            wait_remaining = 0
+            
+            if service and service.timer_id:
+                timer_handle = deps.time_manager.get_timer_by_id(service.timer_id)
+                if timer_handle and timer_handle.is_valid:
+                    served_seconds = timer_handle.elapsed_seconds
+                    current_fee = timer_handle.current_fee
+                else:
+                    served_seconds = service.served_seconds
+                    current_fee = service.current_fee
+            elif service:
+                served_seconds = service.served_seconds
+                current_fee = service.current_fee
+            
+            if wait and wait.timer_id:
+                timer_handle = deps.time_manager.get_timer_by_id(wait.timer_id)
+                if timer_handle and timer_handle.is_valid:
+                    waited_seconds = timer_handle.elapsed_seconds
+                    wait_remaining = timer_handle.remaining_seconds
+                else:
+                    waited_seconds = wait.total_waited_seconds
+                    wait_remaining = wait.wait_seconds
+            elif wait:
+                waited_seconds = wait.total_waited_seconds
+                wait_remaining = wait.wait_seconds
+            
+            total_fee = fee_map.get(room.room_id, 0.0)
+            status = _derive_status(room, service, wait)
+            results.append(
+                {
+                    "roomId": room.room_id,
+                    "status": status,
+                    "currentTemp": room.current_temp,
+                    "targetTemp": room.target_temp,
+                    "speed": room.speed,
+                    "isServing": bool(service),
+                    "isWaiting": bool(wait),
+                    "currentFee": current_fee,
+                    "totalFee": total_fee,
+                    "servedSeconds": served_seconds,
+                    "waitedSeconds": waited_seconds,
+                    "waitRemaining": wait_remaining,
+                    "serviceSpeed": service.speed if service else None,
+                    "serviceStartedAt": service.started_at.isoformat() if service and service.started_at else None,
+                    "waitSpeed": wait.speed if wait else None,
+                }
+            )
+        snapshot_data = {"rooms": results}
+    
+    return TickSyncWithSnapshotResponse(
+        success=success,
+        tickCounter=deps.time_manager.get_tick_counter(),
+        message=f"Waited for {count} tick(s) and captured snapshot" if success else "Timeout waiting for tick",
+        snapshot=snapshot_data
     )
 
 
