@@ -65,6 +65,10 @@ class TimeManager:
     _tick_counter: int = field(default=0)
     _tick_event: threading.Event = field(default_factory=threading.Event)
     _tick_waiters: list = field(default_factory=list)  # asyncio.Event 列表
+    
+    # tick 后回调机制(用于快照采集等需要阻塞 tick 的操作)
+    _post_tick_callback: Optional[Callable[[], Any]] = None
+    _post_tick_event: Optional[asyncio.Event] = None
 
     def __post_init__(self) -> None:
         self._reload_config()
@@ -359,6 +363,17 @@ class TimeManager:
         for waiter in self._tick_waiters:
             waiter.set()
         self._tick_waiters.clear()
+        
+        # 执行 tick 后回调(如果有)，阻塞当前 tick 直到回调完成
+        if self._post_tick_callback and self._post_tick_event:
+            try:
+                # 调用回调函数
+                self._post_tick_callback()
+            finally:
+                # 通知回调完成
+                self._post_tick_event.set()
+                self._post_tick_callback = None
+                self._post_tick_event = None
 
     def _tick_service_timers(self) -> None:
         """推进服务计时器"""
@@ -557,4 +572,42 @@ class TimeManager:
             if not await self.wait_for_next_tick(timeout=per_tick_timeout):
                 return False
         return True
+    
+    async def wait_for_ticks_with_callback(self, count: int, callback: Callable[[], Any], timeout: float = 10.0) -> bool:
+        """
+        等待指定数量的 tick 完成，并在最后一个 tick 完成后立即执行回调(阻塞 tick)
+        
+        参数：
+        - count: 要等待的 tick 数量
+        - callback: tick 完成后立即执行的回调函数(在 tick 线程中同步执行)
+        - timeout: 总超时时间（秒）
+        
+        返回 True 表示成功，False 表示超时
+        
+        注意：回调函数在 tick 线程中执行，会阻塞下一个 tick，确保时间完全同步
+        """
+        # 等待前 count-1 个 tick
+        if count > 1:
+            if not await self.wait_for_ticks(count - 1, timeout=timeout * 0.9):
+                return False
+        
+        # 注册回调，在下一个 tick 完成后立即执行
+        callback_event = asyncio.Event()
+        self._post_tick_callback = callback
+        self._post_tick_event = callback_event
+        
+        # 等待最后一个 tick 完成
+        last_tick_timeout = max(5.0, timeout * 0.1)
+        if not await self.wait_for_next_tick(timeout=last_tick_timeout):
+            # 超时，清理回调
+            self._post_tick_callback = None
+            self._post_tick_event = None
+            return False
+        
+        # 等待回调执行完成
+        try:
+            await asyncio.wait_for(callback_event.wait(), timeout=last_tick_timeout)
+            return True
+        except asyncio.TimeoutError:
+            return False
 

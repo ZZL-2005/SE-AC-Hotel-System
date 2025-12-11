@@ -349,10 +349,10 @@ async def wait_for_tick_and_snapshot(
     timeout: float = 5.0
 ) -> TickSyncWithSnapshotResponse:
     """
-    等待指定数量的 tick 完成,并立即采集房间快照(原子操作)
+    等待指定数量的 tick 完成,并在最后一个 tick 完成后立即采集快照(阻塞 tick)
     
-    此接口确保快照采集与 tick 推进完全同步,避免了 wait_for_tick + snapshot_rooms
-    之间可能产生的额外 tick 导致的时间偏移问题。
+    此接口通过在 tick 线程中同步执行快照采集，确保快照时间戳与 tick 推进完全一致，
+    完全消除了 wait_for_tick + snapshot_rooms 之间可能产生的额外 tick 导致的时间偏移。
     
     参数:
     - count: 要等待的 tick 数量(默认 1)
@@ -368,7 +368,7 @@ async def wait_for_tick_and_snapshot(
     ```python
     # 发送操作
     POST /rooms/1/ac/power-on
-    # 等待 60 个 tick 完成并立即采集快照(1 分钟业务时间)
+    # 等待 60 个 tick 完成并在 tick 线程中立即采集快照(1 分钟业务时间)
     POST /monitor/wait-tick-and-snapshot?count=60&timeout=30
     ```
     """
@@ -380,15 +380,13 @@ async def wait_for_tick_and_snapshot(
             snapshot=None
         )
     
-    # 等待 tick 完成
-    if count == 1:
-        success = await deps.time_manager.wait_for_next_tick(timeout=timeout)
-    else:
-        success = await deps.time_manager.wait_for_ticks(count=count, timeout=timeout)
-    
-    # 立即采集快照(在同一个异步上下文中,确保原子性)
+    # 定义快照采集回调(在 tick 线程中执行)
     snapshot_data = None
-    if success:
+    
+    def capture_snapshot():
+        """tick 后立即执行的快照采集回调(阻塞 tick)"""
+        nonlocal snapshot_data
+        
         # 复用 list_room_status 的逻辑
         with SessionLocal() as session:
             rooms = session.exec(select(RoomModel)).all()
@@ -457,10 +455,17 @@ async def wait_for_tick_and_snapshot(
             )
         snapshot_data = {"rooms": results}
     
+    # 使用带回调的 tick 等待，快照采集在 tick 线程中同步执行
+    success = await deps.time_manager.wait_for_ticks_with_callback(
+        count=count,
+        callback=capture_snapshot,
+        timeout=timeout
+    )
+    
     return TickSyncWithSnapshotResponse(
         success=success,
         tickCounter=deps.time_manager.get_tick_counter(),
-        message=f"Waited for {count} tick(s) and captured snapshot" if success else "Timeout waiting for tick",
+        message=f"Waited for {count} tick(s) and captured snapshot in tick thread" if success else "Timeout waiting for tick",
         snapshot=snapshot_data
     )
 
