@@ -46,18 +46,18 @@ SNAPSHOT_ROWS: List[Dict[str, Any]] = []
 HYPERPARAM_OVERRIDES: Dict[str, float] = {
     # 调度 + 节流
     "maxConcurrent": 3,
-    "timeSliceSeconds": 60,
+    "timeSliceSeconds": 120,
     "changeTempMs": 1000,
     "autoRestartThreshold": 1.0,
     # 温控：来自需求表格（制热 18-25℃、缺省 23℃、不同风速的升温速率）
     "coolRangeMin": 18.0,
-    "coolRangeMax": 25.0,
-    "heatRangeMin": 25.0,
-    "heatRangeMax": 30.0,
-    "idleDriftPerMin": 0.3,
+    "coolRangeMax": 28.0,
+    "heatRangeMin": 18.0,
+    "heatRangeMax": 25.0,
+    "idleDriftPerMin": 0.5,
     "midDeltaPerMin": 0.5,  # 1℃/2min
-    "highMultiplier": 1.2,  # -> 1℃/1min
-    "lowMultiplier": 0.8,  # -> 1℃/3min
+    "highMultiplier": 2,  # -> 1℃/1min
+    "lowMultiplier": 2/3,  # -> 1℃/3min
     "defaultTarget": 23.0,
     # 计费：1 元/1℃，不同风速对应每分钟单价
     "pricePerUnit": 1.0,
@@ -500,30 +500,35 @@ def send_action(action: Dict[str, Any]) -> None:
 
 def wait_for_tick_and_snapshot(minute: int, count: int = 1, timeout: float = 5.0) -> bool:
     """
+<<<<<<< HEAD
+    等待指定数量的 tick 完成并立即采集快照(原子操作)。
+
+=======
     等待指定数量的 tick 完成并在 tick 线程中立即采集快照(阻塞 tick)
     
     通过在 tick 线程中同步执行快照采集,确保快照时间戳与 tick 推进完全一致,
     完全消除了异步等待和快照采集之间可能产生的额外 tick 导致的时间偏移。
     
+>>>>>>> 2e46a1e9030c96dfa8be2834efd492908b15f231
     参数:
     - minute: 当前分钟数(用于显示)
     - count: 要等待的 tick 数量
     - timeout: 总超时时间(秒)
-    
-    返回 True 表示成功，False 表示超时
+
+    返回 True 表示成功，False 表示超时。
     """
     if DRY_RUN:
         CONSOLE.print(Panel.fit(
-            f"[DRY] POST {BASE_URL}/monitor/wait-tick-and-snapshot?count={count}",
+            f"[DRY] POST {BASE_URL}/monitor/wait-tick-and-snapshot\ncount={count}, timeout={timeout:.1f}s",
             title="Dry Run",
             border_style="magenta"
         ))
         return True
-    
+
     try:
         url = f"{BASE_URL}/monitor/wait-tick-and-snapshot"
         params = {"count": count, "timeout": timeout}
-        
+
         # 使用 Rich Table 显示调用信息
         t = Table(title="🕑 Waiting for Tick + Snapshot (Blocking)", box=box.SIMPLE, show_header=False)
         t.add_row("URL", f"{url}")
@@ -531,83 +536,72 @@ def wait_for_tick_and_snapshot(minute: int, count: int = 1, timeout: float = 5.0
         t.add_row("timeout", f"{timeout:.1f}s")
         t.add_row("mechanism", "[cyan]Snapshot in tick thread (blocks next tick)[/]")
         CONSOLE.print(t)
-        
+
         resp = SESSION.post(url, params=params, timeout=timeout + 1)
         resp.raise_for_status()
         result = resp.json()
-        
+
         success = result.get("success", False)
         tick_counter = result.get("tickCounter", 0)
         message = result.get("message", "")
         snapshot = result.get("snapshot")
-        
+
         # 显示结果
         result_table = Table(
             title="✅ Tick Sync + Snapshot Result" if success else "⚠️ Tick Sync Failed",
             box=box.SIMPLE,
             show_header=False
         )
-        result_table.add_row("success", "[green]✓[/]" if success else "[red]✗[/]")
+        result_table.add_row("success", str(success))
         result_table.add_row("tickCounter", str(tick_counter))
         result_table.add_row("message", message)
         if success:
             result_table.add_row("mechanism", "[green]✓ Snapshot captured in tick thread[/]")
         CONSOLE.print(result_table)
-        
+
         # 处理快照数据
         if success and snapshot:
             rooms = snapshot.get("rooms", [])
-            summary = [
-                {
-                    "roomId": room["roomId"],
-                    "status": room["status"],
-                    "currentTemp": room["currentTemp"],
-                    "targetTemp": room["targetTemp"],
-                    "speed": room["speed"],
-                    "currentFee": round(room["currentFee"], 2),
-                    "totalFee": round(room["totalFee"], 2),
-                }
-                for room in rooms
-                if room["roomId"] in SNAPSHOT_ROOMS
-            ]
-            if summary:
-                table = Table(title=f"Snapshot @ minute {minute} (tick={tick_counter})", box=box.SIMPLE)
-                table.add_column("Room")
-                table.add_column("Status")
-                table.add_column("Temp")
-                table.add_column("Speed")
-                table.add_column("Session Fee")
-                table.add_column("Total Fee")
-                for r in summary:
-                    table.add_row(
-                        str(r["roomId"]),
-                        str(r["status"]),
-                        f"{r['currentTemp']:.1f}℃ → {r['targetTemp']:.1f}℃",
-                        str(r["speed"]),
-                        f"￥{r['currentFee']:.2f}",
-                        f"￥{r['totalFee']:.2f}",
-                    )
-                    # 累积原始数据用于 Excel 导出
-                    SNAPSHOT_ROWS.append({
+            for room in rooms:
+                if room["roomId"] in SNAPSHOT_ROOMS:
+                        SNAPSHOT_ROWS.append({
                         "minute": minute,
-                        "roomId": r["roomId"],
-                        "status": r["status"],
-                        "currentTemp": float(r["currentTemp"]),
-                        "targetTemp": float(r["targetTemp"]),
-                        "speed": r["speed"] or "",
-                        "currentFee": float(r["currentFee"]),
-                        "totalFee": float(r["totalFee"]),
+                        "roomId": room["roomId"],
+                        "status": room["status"],
+                        "currentTemp": float(room["currentTemp"]),
+                        "targetTemp": float(room["targetTemp"]),
+                        "speed": room["speed"] or "",
+                        "currentFee": float(room.get("currentFee", 0.0)),
+                        "totalFee": float(room.get("totalFee", 0.0)),
+                        "servedSeconds": int(room.get("servedSeconds", 0)),
+                        "waitedSeconds": int(room.get("waitedSeconds", 0)),
+                        "isServing": bool(room.get("isServing")),
+                        "isWaiting": bool(room.get("isWaiting")),
                     })
-                CONSOLE.print(table)
-        
+
+            CONSOLE.print(f"[green]✔ Snapshot captured for minute {minute}[/]")
+
         return success
+    except requests.HTTPError as exc:
+        if exc.response is not None and exc.response.status_code == 404:
+            CONSOLE.print(Panel(
+                f"[yellow]⚠ API not found: {url}[/]\nFalling back to sleep-based time progression.",
+                title="API Not Found",
+                border_style="yellow"
+            ))
+        else:
+            CONSOLE.print(Panel(
+                f"[red]⚠ Wait for tick and snapshot 调用失败:[/]\n{exc}",
+                title="Error",
+                border_style="red"
+            ))
+        return False
     except requests.RequestException as exc:
-        error_panel = Panel(
+        CONSOLE.print(Panel(
             f"[red]⚠ Wait for tick and snapshot 调用失败:[/]\n{exc}",
             title="Error",
             border_style="red"
-        )
-        CONSOLE.print(error_panel)
+        ))
         return False
 
 
@@ -623,6 +617,7 @@ def snapshot_rooms(minute: int) -> None:
         return
 
     rooms = resp.json().get("rooms", [])
+    # 将监控接口返回的队列信息一并采集（servedSeconds / waitedSeconds / isServing / isWaiting）
     summary = [
         {
             "roomId": room["roomId"],
@@ -630,8 +625,12 @@ def snapshot_rooms(minute: int) -> None:
             "currentTemp": room["currentTemp"],
             "targetTemp": room["targetTemp"],
             "speed": room["speed"],
-            "currentFee": round(room["currentFee"], 2),
-            "totalFee": round(room["totalFee"], 2),
+            "currentFee": round(room.get("currentFee", 0.0), 2),
+            "totalFee": round(room.get("totalFee", 0.0), 2),
+            "servedSeconds": int(room.get("servedSeconds", 0)),
+            "waitedSeconds": int(room.get("waitedSeconds", 0)),
+            "isServing": bool(room.get("isServing")),
+            "isWaiting": bool(room.get("isWaiting")),
         }
         for room in rooms
         if room["roomId"] in SNAPSHOT_ROOMS
@@ -653,7 +652,7 @@ def snapshot_rooms(minute: int) -> None:
                 f"¥{r['currentFee']:.2f}",
                 f"¥{r['totalFee']:.2f}",
             )
-            # accumulate raw rows for Excel export
+            # accumulate raw rows for Excel export（连同队列统计信息）
             SNAPSHOT_ROWS.append({
                 "minute": minute,
                 "roomId": r["roomId"],
@@ -663,6 +662,10 @@ def snapshot_rooms(minute: int) -> None:
                 "speed": r["speed"] or "",
                 "currentFee": float(r["currentFee"]),
                 "totalFee": float(r["totalFee"]),
+                "servedSeconds": int(r.get("servedSeconds", 0)),
+                "waitedSeconds": int(r.get("waitedSeconds", 0)),
+                "isServing": bool(r.get("isServing")),
+                "isWaiting": bool(r.get("isWaiting")),
             })
         CONSOLE.print(table)
 
@@ -675,13 +678,9 @@ def export_excel_snapshots(rows: List[Dict[str, Any]], filename: str = "snapshot
     ws = wb.active
     ws.title = "制热测试用例"
 
-    # styles
+    # styles（简化配色，只保留头部底色，数据区不再按状态上色）
     header_fill = PatternFill("solid", fgColor="FFF2CC")
     subheader_fill = PatternFill("solid", fgColor="FFF2CC")
-    serving_fill = PatternFill("solid", fgColor="C6EFCE")  # green
-    waiting_fill = PatternFill("solid", fgColor="FFEB9C")  # yellow
-    occupied_fill = PatternFill("solid", fgColor="BDD7EE") # blue
-    idle_fill = PatternFill("solid", fgColor="E2EFDA")     # light green
 
     # Build unique minutes and rooms
     minutes = sorted({r["minute"] for r in rows})
@@ -745,23 +744,27 @@ def export_excel_snapshots(rows: List[Dict[str, Any]], filename: str = "snapshot
     for m in minutes_full:
         ws.cell(row=current_row, column=1, value=m)
         col = 2
+        # 构建本分钟的队列字符串：房间ID/时间（秒），仅展示在一行的“服务队列/等待队列”列
+        minute_rows = [r for r in rows if r["minute"] == m]
+        serving_pairs = []
+        waiting_pairs = []
+        for r in minute_rows:
+            if r.get("isServing"):
+                serving_pairs.append(f"R{r['roomId']}/{int(r.get('servedSeconds', 0))}")
+            if r.get("isWaiting"):
+                waiting_pairs.append(f"R{r['roomId']}/{int(r.get('waitedSeconds', 0))}")
+        service_str = " ".join(sorted(serving_pairs)) if serving_pairs else ""
+        wait_str = " ".join(sorted(waiting_pairs)) if waiting_pairs else ""
+
         for room in rooms:
             r = data.get((m, room))
             if r:
                 ws.cell(row=current_row, column=col, value=round(r["currentTemp"], 1))
                 ws.cell(row=current_row, column=col + 1, value=round(r["targetTemp"], 1))
                 ws.cell(row=current_row, column=col + 2, value=r["speed"])
-                ws.cell(row=current_row, column=col + 3, value=round(r["currentFee"], 2))
-                status = str(r["status"]).lower()
-                fill = occupied_fill
-                if status == "serving":
-                    fill = serving_fill
-                elif status == "waiting":
-                    fill = waiting_fill
-                elif status == "idle":
-                    fill = idle_fill
+                # 费用列使用累计费用（totalFee）
+                ws.cell(row=current_row, column=col + 3, value=round(r["totalFee"], 2))
                 for c in range(col, col + 4):
-                    ws.cell(row=current_row, column=c).fill = fill
                     ws.cell(row=current_row, column=c).alignment = Alignment(horizontal="center")
                 last_by_room[room] = r
             else:
@@ -771,26 +774,17 @@ def export_excel_snapshots(rows: List[Dict[str, Any]], filename: str = "snapshot
                     ws.cell(row=current_row, column=col, value=round(lr["currentTemp"], 1))
                     ws.cell(row=current_row, column=col + 1, value=round(lr["targetTemp"], 1))
                     ws.cell(row=current_row, column=col + 2, value=lr["speed"])
-                    ws.cell(row=current_row, column=col + 3, value=round(lr["currentFee"], 2))
-                    status = str(lr["status"]).lower()
-                    fill = occupied_fill
-                    if status == "serving":
-                        fill = serving_fill
-                    elif status == "waiting":
-                        fill = waiting_fill
-                    elif status == "idle":
-                        fill = idle_fill
+                    ws.cell(row=current_row, column=col + 3, value=round(lr["totalFee"], 2))
                     for c in range(col, col + 4):
-                        ws.cell(row=current_row, column=c).fill = fill
                         ws.cell(row=current_row, column=c).alignment = Alignment(horizontal="center")
                 else:
                     for c in range(col, col + 4):
                         ws.cell(row=current_row, column=c, value=None)
                         ws.cell(row=current_row, column=c).alignment = Alignment(horizontal="center")
             col += 4
-        # queue columns placeholders (requires extra API to populate; leave empty)
-        ws.cell(row=current_row, column=len(rooms)*4 + 2, value="")
-        ws.cell(row=current_row, column=len(rooms)*4 + 3, value="")
+        # queue columns：使用当前分钟的服务/等待队列摘要
+        ws.cell(row=current_row, column=len(rooms)*4 + 2, value=service_str)
+        ws.cell(row=current_row, column=len(rooms)*4 + 3, value=wait_str)
         current_row += 1
 
     # auto-width (avoid MergedCell by using column index)
@@ -813,5 +807,3 @@ def export_excel_snapshots(rows: List[Dict[str, Any]], filename: str = "snapshot
 
 if __name__ == "__main__":
     main()
-
-
