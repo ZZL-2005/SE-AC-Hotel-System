@@ -395,7 +395,7 @@ def simulate_timeline(clock_ratio: float, max_minutes: Optional[int] = None) -> 
         else:
             CONSOLE.print(f"[dim]Minute {minute}: No actions[/]")
         
-        # 使用时钟同步接口，每分钟都等待 60 个 tick 完成（1 分钟业务时间）
+        # 使用时钟同步+快照接口，每分钟都等待 60 个 tick 完成（1 分钟业务时间）并立即采集快照
         if not DRY_RUN:
             tick_interval = 60.0 / max(clock_ratio, 0.01) / 60  # 计算每个 tick 的时间
             expected_time = 60 * tick_interval
@@ -403,30 +403,38 @@ def simulate_timeline(clock_ratio: float, max_minutes: Optional[int] = None) -> 
             timeout = max(30.0, expected_time * 20)
             
             info_panel = Panel(
-                f"[cyan]分钟 {minute}: 等待 60 个 tick 完成[/]\n"
+                f"[cyan]分钟 {minute}: 等待 60 个 tick 完成并采集快照[/]\n"
                 f"预计耗时: [yellow]{expected_time:.2f}[/] 秒\n"
                 f"超时设置: [yellow]{timeout:.1f}[/] 秒\n"
                 f"DRY_RUN: [red]{DRY_RUN}[/]",
-                title="⏱️ Time Sync",
+                title="⏱️ Time Sync + Snapshot",
                 border_style="cyan"
             )
             CONSOLE.print(info_panel)
             
-            if not wait_for_tick(count=60, timeout=timeout):
-                CONSOLE.print(Panel(
-                    "[red]⚠ 时钟同步超时，使用 sleep 备用方案[/]",
-                    border_style="red"
-                ))
-                time.sleep(minute_step)
+            # 只有在有操作或第 0 分钟时才采集快照
+            if actions or minute == 0:
+                if not wait_for_tick_and_snapshot(minute=minute, count=60, timeout=timeout):
+                    CONSOLE.print(Panel(
+                        "[red]⚠ 时钟同步超时，使用 sleep 备用方案[/]",
+                        border_style="red"
+                    ))
+                    time.sleep(minute_step)
+                    # 使用旧的快照接口作为备用
+                    snapshot_rooms(minute)
+            else:
+                # 没有操作时只等待，不采集快照
+                if not wait_for_tick_and_snapshot(minute=minute, count=60, timeout=timeout):
+                    CONSOLE.print(Panel(
+                        "[red]⚠ 时钟同步超时，使用 sleep 备用方案[/]",
+                        border_style="red"
+                    ))
+                    time.sleep(minute_step)
         else:
             CONSOLE.print(Panel(
-                f"[yellow]DRY_RUN 模式: 跳过 wait_for_tick (minute={minute})[/]",
+                f"[yellow]DRY_RUN 模式: 跳过 wait_for_tick_and_snapshot (minute={minute})[/]",
                 border_style="yellow"
             ))
-        
-        # 读取快照（每分钟都读取，即使没有操作）
-        if actions or minute == 0:  # 第 0 分钟也要快照作为基线
-            snapshot_rooms(minute)
 
     CONSOLE.print("[green]✔ Timeline replay finished[/]")
     export_excel_snapshots(SNAPSHOT_ROWS)
@@ -489,26 +497,31 @@ def send_action(action: Dict[str, Any]) -> None:
         CONSOLE.print(error_panel)
 
 
-def wait_for_tick(count: int = 1, timeout: float = 5.0) -> bool:
+def wait_for_tick_and_snapshot(minute: int, count: int = 1, timeout: float = 5.0) -> bool:
     """
-    等待指定数量的 tick 完成（时钟同步）
+    等待指定数量的 tick 完成并立即采集快照(原子操作)
     
-    参数：
+    参数:
+    - minute: 当前分钟数(用于显示)
     - count: 要等待的 tick 数量
-    - timeout: 总超时时间（秒）
+    - timeout: 总超时时间(秒)
     
     返回 True 表示成功，False 表示超时
     """
     if DRY_RUN:
-        CONSOLE.print(Panel.fit(f"[DRY] POST {BASE_URL}/monitor/wait-tick?count={count}", title="Dry Run", border_style="magenta"))
+        CONSOLE.print(Panel.fit(
+            f"[DRY] POST {BASE_URL}/monitor/wait-tick-and-snapshot?count={count}",
+            title="Dry Run",
+            border_style="magenta"
+        ))
         return True
     
     try:
-        url = f"{BASE_URL}/monitor/wait-tick"
+        url = f"{BASE_URL}/monitor/wait-tick-and-snapshot"
         params = {"count": count, "timeout": timeout}
         
         # 使用 Rich Table 显示调用信息
-        t = Table(title="🕑 Waiting for Tick", box=box.SIMPLE, show_header=False)
+        t = Table(title="🕑 Waiting for Tick and Snapshot", box=box.SIMPLE, show_header=False)
         t.add_row("URL", f"{url}")
         t.add_row("count", str(count))
         t.add_row("timeout", f"{timeout:.1f}s")
@@ -521,18 +534,69 @@ def wait_for_tick(count: int = 1, timeout: float = 5.0) -> bool:
         success = result.get("success", False)
         tick_counter = result.get("tickCounter", 0)
         message = result.get("message", "")
+        snapshot = result.get("snapshot")
         
         # 显示结果
-        result_table = Table(title="✅ Tick Sync Result" if success else "⚠️ Tick Sync Failed", box=box.SIMPLE, show_header=False)
+        result_table = Table(
+            title="✅ Tick Sync + Snapshot Result" if success else "⚠️ Tick Sync Failed",
+            box=box.SIMPLE,
+            show_header=False
+        )
         result_table.add_row("success", "[green]✓[/]" if success else "[red]✗[/]")
         result_table.add_row("tickCounter", str(tick_counter))
         result_table.add_row("message", message)
         CONSOLE.print(result_table)
         
+        # 处理快照数据
+        if success and snapshot:
+            rooms = snapshot.get("rooms", [])
+            summary = [
+                {
+                    "roomId": room["roomId"],
+                    "status": room["status"],
+                    "currentTemp": room["currentTemp"],
+                    "targetTemp": room["targetTemp"],
+                    "speed": room["speed"],
+                    "currentFee": round(room["currentFee"], 2),
+                    "totalFee": round(room["totalFee"], 2),
+                }
+                for room in rooms
+                if room["roomId"] in SNAPSHOT_ROOMS
+            ]
+            if summary:
+                table = Table(title=f"Snapshot @ minute {minute}", box=box.SIMPLE)
+                table.add_column("Room")
+                table.add_column("Status")
+                table.add_column("Temp")
+                table.add_column("Speed")
+                table.add_column("Session Fee")
+                table.add_column("Total Fee")
+                for r in summary:
+                    table.add_row(
+                        str(r["roomId"]),
+                        str(r["status"]),
+                        f"{r['currentTemp']:.1f}℃ → {r['targetTemp']:.1f}℃",
+                        str(r["speed"]),
+                        f"￥{r['currentFee']:.2f}",
+                        f"￥{r['totalFee']:.2f}",
+                    )
+                    # 累积原始数据用于 Excel 导出
+                    SNAPSHOT_ROWS.append({
+                        "minute": minute,
+                        "roomId": r["roomId"],
+                        "status": r["status"],
+                        "currentTemp": float(r["currentTemp"]),
+                        "targetTemp": float(r["targetTemp"]),
+                        "speed": r["speed"] or "",
+                        "currentFee": float(r["currentFee"]),
+                        "totalFee": float(r["totalFee"]),
+                    })
+                CONSOLE.print(table)
+        
         return success
     except requests.RequestException as exc:
         error_panel = Panel(
-            f"[red]⚠ Wait for tick 调用失败:[/]\n{exc}",
+            f"[red]⚠ Wait for tick and snapshot 调用失败:[/]\n{exc}",
             title="Error",
             border_style="red"
         )
