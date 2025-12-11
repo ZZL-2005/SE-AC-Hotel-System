@@ -1,12 +1,7 @@
 version: v0.0.1
-
-# 存储后端配置
 storage:
-  # 数据库后端: sqlite | memory
   database: sqlite
-  # 队列后端: sqlite | memory (建议与 database 保持一致)
   queue: sqlite
-
 temperature:
   cool_range:
   - 18
@@ -27,10 +22,10 @@ billing:
   rate_low_unit_per_min: 0.3333333333333333
 scheduling:
   max_concurrent: 3
-  time_slice_seconds: 20
+  time_slice_seconds: 60
 throttle:
   change_temp_ms: 1000
 accommodation:
   rate_per_night: 150.0
 clock:
-  ratio: 1.0
+  ratio: 60.0

@@ -81,7 +81,14 @@ class TimerStatsResponse(BaseModel):
     totalTimers: int
     byType: Dict[str, int]
     tickInterval: float
+    tickCounter: int
     pendingEvents: int
+
+
+class TickSyncResponse(BaseModel):
+    success: bool
+    tickCounter: int
+    message: str
 
 
 @router.post("/rooms/open")
@@ -249,6 +256,7 @@ def get_timer_stats() -> TimerStatsResponse:
         totalTimers=stats["total_timers"],
         byType=stats["by_type"],
         tickInterval=stats["tick_interval"],
+        tickCounter=stats["tick_counter"],
         pendingEvents=stats["pending_events"]
     )
 
@@ -257,6 +265,66 @@ def get_timer_stats() -> TimerStatsResponse:
 def list_timers() -> Dict[str, List[Dict[str, Any]]]:
     """列出所有活跃的计时器（调试用）。"""
     return {"timers": deps.time_manager.list_timers()}
+
+
+# ================== 时钟同步 API ==================
+@router.get("/tick-counter")
+def get_tick_counter() -> Dict[str, Any]:
+    """
+    获取当前 tick 计数器
+    
+    用于时钟同步，外部可以通过该计数器判断时钟是否推进
+    """
+    return {
+        "tickCounter": deps.time_manager.get_tick_counter(),
+        "tickInterval": deps.time_manager.get_tick_interval()
+    }
+
+
+@router.post("/wait-tick", response_model=TickSyncResponse)
+async def wait_for_tick(
+    count: int = 1,
+    timeout: float = 5.0
+) -> TickSyncResponse:
+    """
+    等待指定数量的 tick 完成（时钟同步接口）
+    
+    参数：
+    - count: 要等待的 tick 数量（默认 1）
+    - timeout: 总超时时间（秒，默认 5）
+    
+    返回：
+    - success: 是否成功等待
+    - tickCounter: 当前 tick 计数
+    - message: 结果消息
+    
+    用法示例：
+    ```python
+    # 发送操作
+    POST /rooms/1/ac/power-on
+    # 等待 1 个 tick 完成
+    POST /monitor/wait-tick?count=1
+    # 读取快照
+    GET /monitor/rooms
+    ```
+    """
+    if count <= 0:
+        return TickSyncResponse(
+            success=False,
+            tickCounter=deps.time_manager.get_tick_counter(),
+            message="count must be positive"
+        )
+    
+    if count == 1:
+        success = await deps.time_manager.wait_for_next_tick(timeout=timeout)
+    else:
+        success = await deps.time_manager.wait_for_ticks(count=count, timeout=timeout)
+    
+    return TickSyncResponse(
+        success=success,
+        tickCounter=deps.time_manager.get_tick_counter(),
+        message=f"Waited for {count} tick(s)" if success else "Timeout waiting for tick"
+    )
 
 
 def _derive_status(room: RoomModel, service, wait) -> str:
@@ -352,6 +420,10 @@ def _apply_hyperparam_updates(raw: Dict[str, Any], updates: Dict[str, Any]) -> N
         throttle["change_temp_ms"] = int(updates["changeTempMs"])
     if "autoRestartThreshold" in updates:
         temperature["auto_restart_threshold"] = float(updates["autoRestartThreshold"])
+    if "coolRangeMin" in updates and "coolRangeMax" in updates:
+        temperature["cool_range"] = [float(updates["coolRangeMin"]), float(updates["coolRangeMax"])]
+    if "heatRangeMin" in updates and "heatRangeMax" in updates:
+        temperature["heat_range"] = [float(updates["heatRangeMin"]), float(updates["heatRangeMax"])]
     if "idleDriftPerMin" in updates:
         temperature["idle_drift_per_min"] = float(updates["idleDriftPerMin"])
     if "midDeltaPerMin" in updates:

@@ -10,6 +10,7 @@ from sqlmodel import select
 from interfaces import deps
 from infrastructure.database import SessionLocal
 from infrastructure.models import ACDetailRecordModel, RoomModel, ServiceObjectModel, WaitEntryModel
+from application.use_ac_service import TemperatureRangeError
 
 router = APIRouter(prefix="/rooms", tags=["ac"])
 
@@ -89,13 +90,16 @@ def _room_state(room_id: str) -> Dict[str, Any]:
 # ========== 1. Power On ==========
 @router.post("/{room_id}/ac/power-on")
 def power_on(room_id: str, payload: Optional[PowerOnRequest] = None) -> Dict[str, Any]:
-    deps.ac_service.power_on(
-        room_id,
-        payload.mode if payload else None,
-        payload.targetTemp if payload else None,
-        payload.speed if payload else None,
-    )
-    return _room_state(room_id)
+    try:
+        deps.ac_service.power_on(
+            room_id,
+            payload.mode if payload else None,
+            payload.targetTemp if payload else None,
+            payload.speed if payload else None,
+        )
+        return _room_state(room_id)
+    except TemperatureRangeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 # ========== 2. Power Off ==========
@@ -108,8 +112,11 @@ def power_off(room_id: str) -> Dict[str, Any]:
 # ========== 3. Change Temperature ==========
 @router.post("/{room_id}/ac/change-temp")
 def change_temp(room_id: str, payload: ChangeTempRequest) -> Dict[str, Any]:
-    deps.ac_service.change_temp(room_id, payload.targetTemp)
-    return _room_state(room_id)
+    try:
+        deps.ac_service.change_temp(room_id, payload.targetTemp)
+        return _room_state(room_id)
+    except TemperatureRangeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 # ========== 4. Change Speed ==========

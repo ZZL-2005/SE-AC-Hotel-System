@@ -1,6 +1,8 @@
 """时间管理器 - 统一管理所有计时任务"""
 from __future__ import annotations
 
+import asyncio
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Callable, Dict, Iterable, Optional, Set, TYPE_CHECKING
@@ -58,12 +60,21 @@ class TimeManager:
     _room_lookup: Callable[[str], Optional["Room"]] = field(default=lambda room_id: None)
     _iter_rooms: Callable[[], Iterable["Room"]] = field(default=lambda: [])
     _save_room: Callable[["Room"], None] = field(default=lambda room: None)
+    
+    # 时钟同步机制
+    _tick_counter: int = field(default=0)
+    _tick_event: threading.Event = field(default_factory=threading.Event)
+    _tick_waiters: list = field(default_factory=list)  # asyncio.Event 列表
 
     def __post_init__(self) -> None:
         self._reload_config()
         # 初始化房间到计时器的映射
         if not self._room_to_timer:
             self._room_to_timer = {}
+        # 初始化时钟同步
+        self._tick_counter = 0
+        self._tick_event = threading.Event()
+        self._tick_waiters = []
 
     def _reload_config(self) -> None:
         """从配置加载参数"""
@@ -338,6 +349,16 @@ class TimeManager:
         self._tick_temperatures()
         self._tick_throttle_windows()
         self._check_auto_restart()
+        
+        # 时钟沿通知
+        self._tick_counter += 1
+        self._tick_event.set()  # 唤醒同步等待的线程
+        self._tick_event.clear()
+        
+        # 唤醒异步等待者
+        for waiter in self._tick_waiters:
+            waiter.set()
+        self._tick_waiters.clear()
 
     def _tick_service_timers(self) -> None:
         """推进服务计时器"""
@@ -457,6 +478,7 @@ class TimeManager:
             "total_timers": len(self._timers),
             "by_type": type_counts,
             "tick_interval": self._tick_interval,
+            "tick_counter": self._tick_counter,
             "pending_events": self.event_bus.pending_count()
         }
 
@@ -475,4 +497,64 @@ class TimeManager:
             }
             for state in self._timers.values()
         ]
+
+    # ================== 时钟同步接口 ==================
+    def get_tick_counter(self) -> int:
+        """获取当前 tick 计数（用于时钟同步）"""
+        return self._tick_counter
+
+    async def wait_for_next_tick(self, timeout: float = 5.0) -> bool:
+        """
+        等待下一个 tick 完成（异步接口）
+        
+        返回 True 表示成功等待，False 表示超时
+        
+        用法示例：
+        ```python
+        # 发送操作
+        await ac_client.power_on(room_id)
+        # 等待时钟推进
+        await time_manager.wait_for_next_tick()
+        # 读取快照
+        snapshot = await monitor_client.fetch_rooms()
+        ```
+        """
+        # 记录当前 tick 计数
+        start_counter = self._tick_counter
+        
+        waiter = asyncio.Event()
+        self._tick_waiters.append(waiter)
+        
+        try:
+            await asyncio.wait_for(waiter.wait(), timeout=timeout)
+            return True
+        except asyncio.TimeoutError:
+            # 超时后从等待列表中移除
+            if waiter in self._tick_waiters:
+                self._tick_waiters.remove(waiter)
+            
+            # 检查是否实际上 tick 已经推进（可能是通知丢失）
+            if self._tick_counter > start_counter:
+                return True
+            
+            return False
+
+    async def wait_for_ticks(self, count: int, timeout: float = 10.0) -> bool:
+        """
+        等待指定数量的 tick 完成
+        
+        参数：
+        - count: 要等待的 tick 数量
+        - timeout: 总超时时间（秒）
+        
+        返回 True 表示成功等待，False 表示超时
+        """
+        # 为每个 tick 留出充裕的缓冲时间，避免因处理延迟而超时
+        # 每个 tick 的超时 = max(3秒, 总超时 / count * 3)
+        per_tick_timeout = max(10.0, timeout / count * 3)
+        
+        for i in range(count):
+            if not await self.wait_for_next_tick(timeout=per_tick_timeout):
+                return False
+        return True
 

@@ -50,6 +50,10 @@ HYPERPARAM_OVERRIDES: Dict[str, float] = {
     "changeTempMs": 1000,
     "autoRestartThreshold": 1.0,
     # 温控：来自需求表格（制热 18-25℃、缺省 23℃、不同风速的升温速率）
+    "coolRangeMin": 18.0,
+    "coolRangeMax": 25.0,
+    "heatRangeMin": 25.0,
+    "heatRangeMax": 30.0,
     "idleDriftPerMin": 0.3,
     "midDeltaPerMin": 0.5,  # 1℃/2min
     "highMultiplier": 1.2,  # -> 1℃/1min
@@ -219,9 +223,14 @@ def main() -> None:
 
     defaults = fetch_hyperparams()
     applied = configure_hyperparams(defaults)
+    
+    # 同步 tick_interval，确保后端时间推进与测试脚本一致
+    clock_ratio = applied.get("clockRatio", 1.0)
+    configure_tick_interval(clock_ratio)
+    
     open_rooms(ROOM_PRESETS)
     check_in_rooms(ROOM_PRESETS)
-    simulate_timeline(applied["clockRatio"], max_minutes=args.max_minutes)
+    simulate_timeline(clock_ratio, max_minutes=args.max_minutes)
 
 
 def parse_args() -> argparse.Namespace:
@@ -289,6 +298,33 @@ def configure_hyperparams(defaults: Dict[str, Any]) -> Dict[str, Any]:
     return applied
 
 
+def configure_tick_interval(clock_ratio: float) -> None:
+    """根据 clockRatio 调整后端 tick 间隔，使时间加速与测试用例一致。"""
+    if clock_ratio <= 0:
+        return
+    # 时钟倍率 = 相对正常速度的倍数；interval 越小越快
+    interval = max(0.01, min(10.0, 1.0 / float(clock_ratio)))
+    if DRY_RUN:
+        CONSOLE.print(
+            Panel.fit(
+                f"[DRY] PUT {BASE_URL}/monitor/tick-interval\ninterval={interval}",
+                title="Dry Run",
+                border_style="magenta",
+            )
+        )
+        return
+    try:
+        resp = SESSION.put(f"{BASE_URL}/monitor/tick-interval", json={"interval": interval}, timeout=5)
+        resp.raise_for_status()
+        body = resp.json()
+        t = Table(title="Tick Interval", box=box.SIMPLE, show_header=False)
+        t.add_row("interval", str(body.get("interval")))
+        t.add_row("speedMultiplier", str(body.get("speedMultiplier")))
+        CONSOLE.print(t)
+    except requests.RequestException as exc:
+        CONSOLE.print(f"[yellow]⚠ Failed to configure tick interval: {exc}[/]")
+
+
 def open_rooms(presets: Iterable[Dict[str, Any]]) -> None:
     for room in presets:
         if DRY_RUN:
@@ -334,17 +370,63 @@ def simulate_timeline(clock_ratio: float, max_minutes: Optional[int] = None) -> 
     max_minute = max(TIMELINE.keys(), default=0)
     if max_minutes is not None:
         max_minute = min(max_minute, max_minutes)
-    CONSOLE.print(Panel.fit(f"minutes={max_minute}\nclockRatio={clock_ratio}", title="Starting Timeline", border_style="cyan"))
+    
+    CONSOLE.print(Panel.fit(
+        f"minutes={max_minute}\nclockRatio={clock_ratio}\nminute_step={minute_step:.2f}s\nDRY_RUN={DRY_RUN}", 
+        title="Starting Timeline", 
+        border_style="cyan"
+    ))
+
+    # 等待后端完全处理 tick_interval 配置后再开始
+    if not DRY_RUN:
+        CONSOLE.print("[yellow]等待 2 秒让后端同步 tick_interval...[/]")
+        time.sleep(2)
+    else:
+        CONSOLE.print("[yellow]DRY_RUN 模式，跳过等待[/]")
 
     for minute in range(0, max_minute + 1):
         actions = TIMELINE.get(minute, [])
+        
+        # 执行该分钟的操作
         if actions:
             CONSOLE.print(Panel.fit(f"Minute {minute}", border_style="blue"))
             for action in actions:
                 send_action(action)
-            snapshot_rooms(minute)
+        else:
+            CONSOLE.print(f"[dim]Minute {minute}: No actions[/]")
+        
+        # 使用时钟同步接口，每分钟都等待 60 个 tick 完成（1 分钟业务时间）
         if not DRY_RUN:
-            time.sleep(minute_step)
+            tick_interval = 60.0 / max(clock_ratio, 0.01) / 60  # 计算每个 tick 的时间
+            expected_time = 60 * tick_interval
+            # 超时时间设置为预期时间的 20 倍，确保即使 CPU 负载很高也不会超时
+            timeout = max(30.0, expected_time * 20)
+            
+            info_panel = Panel(
+                f"[cyan]分钟 {minute}: 等待 60 个 tick 完成[/]\n"
+                f"预计耗时: [yellow]{expected_time:.2f}[/] 秒\n"
+                f"超时设置: [yellow]{timeout:.1f}[/] 秒\n"
+                f"DRY_RUN: [red]{DRY_RUN}[/]",
+                title="⏱️ Time Sync",
+                border_style="cyan"
+            )
+            CONSOLE.print(info_panel)
+            
+            if not wait_for_tick(count=60, timeout=timeout):
+                CONSOLE.print(Panel(
+                    "[red]⚠ 时钟同步超时，使用 sleep 备用方案[/]",
+                    border_style="red"
+                ))
+                time.sleep(minute_step)
+        else:
+            CONSOLE.print(Panel(
+                f"[yellow]DRY_RUN 模式: 跳过 wait_for_tick (minute={minute})[/]",
+                border_style="yellow"
+            ))
+        
+        # 读取快照（每分钟都读取，即使没有操作）
+        if actions or minute == 0:  # 第 0 分钟也要快照作为基线
+            snapshot_rooms(minute)
 
     CONSOLE.print("[green]✔ Timeline replay finished[/]")
     export_excel_snapshots(SNAPSHOT_ROWS)
@@ -369,14 +451,93 @@ def send_action(action: Dict[str, Any]) -> None:
     if DRY_RUN:
         CONSOLE.print(Panel.fit(f"[DRY] POST {BASE_URL}{path}", title="Dry Run", border_style="magenta"))
         return
-    resp = SESSION.post(f"{BASE_URL}{path}", json=payload if payload else None, timeout=5)
-    resp.raise_for_status()
-    body = resp.json()
-    t = Table(title=f"{action_type.upper()} → Room {room_id}", box=box.SIMPLE, show_header=False)
-    t.add_row("status", str(body.get("status")))
-    t.add_row("isServing", str(body.get("isServing")))
-    t.add_row("isWaiting", str(body.get("isWaiting")))
-    CONSOLE.print(t)
+    
+    try:
+        resp = SESSION.post(f"{BASE_URL}{path}", json=payload if payload else None, timeout=5)
+        resp.raise_for_status()
+        body = resp.json()
+        t = Table(title=f"{action_type.upper()} → Room {room_id}", box=box.SIMPLE, show_header=False)
+        t.add_row("status", str(body.get("status")))
+        t.add_row("isServing", str(body.get("isServing")))
+        t.add_row("isWaiting", str(body.get("isWaiting")))
+        CONSOLE.print(t)
+    except requests.HTTPError as e:
+        # 捕获 HTTP 错误（如 400 Bad Request），显示错误信息但不中断测试
+        error_detail = "Unknown error"
+        if e.response is not None:
+            try:
+                error_body = e.response.json()
+                error_detail = error_body.get("detail", str(e))
+            except:
+                error_detail = e.response.text or str(e)
+        
+        error_panel = Panel(
+            f"[red]❌ {action_type.upper()} → Room {room_id} FAILED[/]\n"
+            f"[yellow]{error_detail}[/]",
+            title="⚠️ Request Rejected",
+            border_style="red"
+        )
+        CONSOLE.print(error_panel)
+    except requests.RequestException as e:
+        # 捕获其他网络错误
+        error_panel = Panel(
+            f"[red]❌ {action_type.upper()} → Room {room_id} FAILED[/]\n"
+            f"[yellow]{str(e)}[/]",
+            title="⚠️ Network Error",
+            border_style="red"
+        )
+        CONSOLE.print(error_panel)
+
+
+def wait_for_tick(count: int = 1, timeout: float = 5.0) -> bool:
+    """
+    等待指定数量的 tick 完成（时钟同步）
+    
+    参数：
+    - count: 要等待的 tick 数量
+    - timeout: 总超时时间（秒）
+    
+    返回 True 表示成功，False 表示超时
+    """
+    if DRY_RUN:
+        CONSOLE.print(Panel.fit(f"[DRY] POST {BASE_URL}/monitor/wait-tick?count={count}", title="Dry Run", border_style="magenta"))
+        return True
+    
+    try:
+        url = f"{BASE_URL}/monitor/wait-tick"
+        params = {"count": count, "timeout": timeout}
+        
+        # 使用 Rich Table 显示调用信息
+        t = Table(title="🕑 Waiting for Tick", box=box.SIMPLE, show_header=False)
+        t.add_row("URL", f"{url}")
+        t.add_row("count", str(count))
+        t.add_row("timeout", f"{timeout:.1f}s")
+        CONSOLE.print(t)
+        
+        resp = SESSION.post(url, params=params, timeout=timeout + 1)
+        resp.raise_for_status()
+        result = resp.json()
+        
+        success = result.get("success", False)
+        tick_counter = result.get("tickCounter", 0)
+        message = result.get("message", "")
+        
+        # 显示结果
+        result_table = Table(title="✅ Tick Sync Result" if success else "⚠️ Tick Sync Failed", box=box.SIMPLE, show_header=False)
+        result_table.add_row("success", "[green]✓[/]" if success else "[red]✗[/]")
+        result_table.add_row("tickCounter", str(tick_counter))
+        result_table.add_row("message", message)
+        CONSOLE.print(result_table)
+        
+        return success
+    except requests.RequestException as exc:
+        error_panel = Panel(
+            f"[red]⚠ Wait for tick 调用失败:[/]\n{exc}",
+            title="Error",
+            border_style="red"
+        )
+        CONSOLE.print(error_panel)
+        return False
 
 
 def snapshot_rooms(minute: int) -> None:

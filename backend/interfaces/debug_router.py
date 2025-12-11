@@ -91,19 +91,26 @@ def batch_checkin(payload: BatchCheckinRequest) -> Dict[str, Any]:
     results = []
     for idx, room_id in enumerate(payload.roomIds):
         try:
-            # 使用 deps 中的 checkin_service
-            order = deps.checkin_service.check_in(
-                room_id=room_id,
+            # 调用前台入住服务
+            from application.frontdesk_service import FrontDeskService
+            
+            frontdesk = FrontDeskService(
+                room_repository=deps.room_repository,
+                billing_service=deps.billing_service,
+            )
+            
+            order = frontdesk.check_in(
                 cust_id=f"DEBUG{idx:03d}",
                 cust_name=f"调试用户{idx + 1}",
                 guest_count=1,
-                check_in_date_str=datetime.now(timezone.utc).isoformat(),
+                check_in_date=datetime.now(timezone.utc),
+                room_id=room_id,
                 deposit=0.0,
             )
             
             results.append({
                 "roomId": room_id,
-                "orderId": order.get("orderId"),
+                "orderId": order.order_id,
                 "success": True,
             })
         except Exception as e:

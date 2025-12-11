@@ -14,6 +14,11 @@ if TYPE_CHECKING:  # pragma: no cover - typing guard
     from application.scheduler import Scheduler
 
 
+class TemperatureRangeError(Exception):
+    """温度超出允许范围的异常。"""
+    pass
+
+
 class UseACService:
     """Implements房间控制流程 + 温控逻辑入口."""
 
@@ -64,6 +69,26 @@ class UseACService:
         return room
 
     # Public API ------------------------------------------------------------
+    def _validate_target_temp(self, target_temp: float, mode: str) -> None:
+        """验证目标温度是否在合法范围内。"""
+        temp_cfg = self.config.temperature or {}
+        
+        if mode == "cool":
+            temp_range = temp_cfg.get("cool_range", [18, 25])
+        elif mode == "heat":
+            temp_range = temp_cfg.get("heat_range", [25, 30])
+        else:
+            # 默认使用制冷范围
+            temp_range = temp_cfg.get("cool_range", [18, 25])
+        
+        min_temp, max_temp = float(temp_range[0]), float(temp_range[1])
+        
+        if target_temp < min_temp or target_temp > max_temp:
+            raise TemperatureRangeError(
+                f"Target temperature {target_temp}°C is out of range for {mode} mode. "
+                f"Valid range: {min_temp}°C - {max_temp}°C"
+            )
+    
     def power_on(
         self,
         room_id: str,
@@ -75,14 +100,18 @@ class UseACService:
         room.mark_occupied(initial_temp=room.current_temp)
 
         temp_cfg = self.config.temperature or {}
+        
+        # 确定模式
+        room.mode = mode or room.mode or "cool"
+        
         # 优先使用传入的 target_temp，其次保留已设置的温度，最后使用配置默认值
         if target_temp is not None:
+            self._validate_target_temp(target_temp, room.mode)
             room.target_temp = target_temp
         elif room.target_temp is None:
             room.target_temp = float(temp_cfg.get("default_target", 25.0))
         # 否则保留 room.target_temp 不变
 
-        room.mode = mode or room.mode or "cool"
         room.speed = speed or room.speed or "MID"
         room.is_serving = False
         room.manual_powered_off = False
@@ -93,6 +122,10 @@ class UseACService:
 
     def change_temp(self, room_id: str, target_temp: float) -> None:
         room = self._ensure_room(room_id)
+        
+        # 验证温度范围
+        self._validate_target_temp(target_temp, room.mode)
+        
         throttle_cfg = self.config.throttle or {}
         throttle_ms = int(throttle_cfg.get("change_temp_ms", 1000))
         now = datetime.utcnow()
