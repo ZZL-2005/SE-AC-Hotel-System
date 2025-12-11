@@ -3,6 +3,7 @@ from .frontdesk_router import router as frontdesk_router
 from .monitor_router import router as monitor_router
 from .report_router import router as report_router
 from .debug_router import router as debug_router
+from .adapter_router import router as adapter_router
 
 __all__ = [
     "ac_router",
@@ -10,4 +11,5 @@ __all__ = [
     "monitor_router",
     "report_router",
     "debug_router",
+    "adapter_router",
 ]

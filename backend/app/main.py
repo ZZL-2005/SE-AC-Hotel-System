@@ -4,9 +4,10 @@ import asyncio
 import contextlib
 import socketio
 
-from interfaces import ac_router, frontdesk_router, monitor_router, report_router, debug_router
+from interfaces import ac_router, frontdesk_router, monitor_router, report_router, debug_router, adapter_router
 from interfaces import deps
 from infrastructure.socketio_manager import sio, set_room_repository, set_queues
+from infrastructure.adapter_sio import adapter_app
 
 # 设置 Socket.IO 的房间仓储和队列引用
 set_room_repository(deps.repository)
@@ -19,6 +20,7 @@ app.include_router(frontdesk_router)
 app.include_router(monitor_router)
 app.include_router(report_router)
 app.include_router(debug_router)
+app.include_router(adapter_router)  # 适配器路由
 
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -30,7 +32,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 将 Socket.IO 挂载到 FastAPI，创建组合 ASGI 应用
+# 先挂载适配器 SocketIO 到 /adapter 路径 (必须在创建 socket_app 之前)
+app.mount("/adapter", adapter_app)
+
+# 将原有的 Socket.IO 挂载到 FastAPI，创建组合 ASGI 应用
 socket_app = socketio.ASGIApp(sio, other_asgi_app=app)
 
 

@@ -97,14 +97,7 @@ class TickSyncWithSnapshotResponse(BaseModel):
     tickCounter: int
     message: str
     snapshot: Optional[Dict[str, Any]] = None  # 房间快照数据
-
-
-class TickSyncWithSnapshotResponse(BaseModel):
-    """时钟同步 + 快照响应模型"""
-    success: bool
-    tickCounter: int
-    message: str
-    snapshot: Optional[Dict[str, Any]] = None  # 房间快照数据
+    nextWaitStarted: bool = False  # 是否已启动下一轮等待
 
 
 @router.post("/rooms/open")
@@ -346,7 +339,9 @@ async def wait_for_tick(
 @router.post("/wait-tick-and-snapshot", response_model=TickSyncWithSnapshotResponse)
 async def wait_for_tick_and_snapshot(
     count: int = 1,
-    timeout: float = 5.0
+    timeout: float = 5.0,
+    chain_next: bool = False,
+    next_count: int = 1
 ) -> TickSyncWithSnapshotResponse:
     """
     等待指定数量的 tick 完成,并在最后一个 tick 完成后立即采集快照(阻塞 tick)
@@ -357,19 +352,24 @@ async def wait_for_tick_and_snapshot(
     参数:
     - count: 要等待的 tick 数量(默认 1)
     - timeout: 总超时时间(秒,默认 5)
+    - chain_next: 是否在快照采集后立即启动下一轮等待(默认 False)
+    - next_count: 下一轮要等待的 tick 数量(仅当 chain_next=True 时生效)
     
     返回:
     - success: 是否成功等待
     - tickCounter: 当前 tick 计数
     - message: 结果消息
     - snapshot: 房间快照数据(与 GET /monitor/rooms 格式相同)
+    - nextWaitStarted: 是否已启动下一轮等待(仅当 chain_next=True 时为 True)
     
     用法示例:
     ```python
-    # 发送操作
-    POST /rooms/1/ac/power-on
-    # 等待 60 个 tick 完成并在 tick 线程中立即采集快照(1 分钟业务时间)
+    # 方式1：独立调用
     POST /monitor/wait-tick-and-snapshot?count=60&timeout=30
+    
+    # 方式2：链式调用(防止漏 tick)
+    POST /monitor/wait-tick-and-snapshot?count=60&timeout=30&chain_next=true&next_count=60
+    # 在快照采集完成后，会立即在 tick 线程中启动下一轮等待，确保无缝衔接
     ```
     """
     if count <= 0:
@@ -377,15 +377,17 @@ async def wait_for_tick_and_snapshot(
             success=False,
             tickCounter=deps.time_manager.get_tick_counter(),
             message="count must be positive",
-            snapshot=None
+            snapshot=None,
+            nextWaitStarted=False
         )
     
     # 定义快照采集回调(在 tick 线程中执行)
     snapshot_data = None
+    next_wait_started = False
     
     def capture_snapshot():
         """tick 后立即执行的快照采集回调(阻塞 tick)"""
-        nonlocal snapshot_data
+        nonlocal snapshot_data, next_wait_started
         
         # 复用 list_room_status 的逻辑
         with SessionLocal() as session:
@@ -454,6 +456,11 @@ async def wait_for_tick_and_snapshot(
                 }
             )
         snapshot_data = {"rooms": results}
+        
+        # 如果启用链式等待，在快照采集后立即启动下一轮等待(在 tick 线程中)
+        if chain_next and next_count > 0:
+            deps.time_manager.start_chained_wait(next_count)
+            next_wait_started = True
     
     # 使用带回调的 tick 等待，快照采集在 tick 线程中同步执行
     success = await deps.time_manager.wait_for_ticks_with_callback(
@@ -466,7 +473,8 @@ async def wait_for_tick_and_snapshot(
         success=success,
         tickCounter=deps.time_manager.get_tick_counter(),
         message=f"Waited for {count} tick(s) and captured snapshot in tick thread" if success else "Timeout waiting for tick",
-        snapshot=snapshot_data
+        snapshot=snapshot_data,
+        nextWaitStarted=next_wait_started
     )
 
 

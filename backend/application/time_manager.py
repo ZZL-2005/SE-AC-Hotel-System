@@ -69,6 +69,11 @@ class TimeManager:
     # tick 后回调机制(用于快照采集等需要阻塞 tick 的操作)
     _post_tick_callback: Optional[Callable[[], Any]] = None
     _post_tick_event: Optional[asyncio.Event] = None
+    
+    # 链式等待支持(在 tick 回调中注册下一轮等待)
+    _chained_wait_count: int = 0  # 下一轮要等待的 tick 数
+    _chained_wait_event: Optional[asyncio.Event] = None  # 下一轮等待的事件
+    _chained_wait_started_tick: int = -1  # 链式等待启动时的 tick 计数（用于跳过当前 tick）
 
     def __post_init__(self) -> None:
         self._reload_config()
@@ -374,6 +379,17 @@ class TimeManager:
                 self._post_tick_event.set()
                 self._post_tick_callback = None
                 self._post_tick_event = None
+        
+        # 处理链式等待：如果有链式等待被注册，检查是否达到目标 tick 数
+        if self._chained_wait_event and self._chained_wait_count > 0:
+            # 跳过启动链式等待的那个 tick，从下一个 tick 开始计数
+            if self._tick_counter > self._chained_wait_started_tick:
+                self._chained_wait_count -= 1
+                if self._chained_wait_count <= 0:
+                    # 链式等待完成，通知等待者
+                    self._chained_wait_event.set()
+                    self._chained_wait_event = None
+                    self._chained_wait_started_tick = -1
 
     def _tick_service_timers(self) -> None:
         """推进服务计时器"""
@@ -610,4 +626,47 @@ class TimeManager:
             return True
         except asyncio.TimeoutError:
             return False
+    
+    def start_chained_wait(self, count: int) -> None:
+        """
+        在 tick 回调中启动链式等待，立即注册下一轮等待
+        
+        此方法应在 tick 回调中调用，以确保下一轮等待从下一个 tick 开始，
+        避免在响应返回和下一次请求之间漏过 tick。
+        
+        参数:
+        - count: 要等待的 tick 数量
+        
+        注意：计数从下一个 tick 开始，当前 tick 不计入。
+        """
+        if count <= 0:
+            return
+        
+        # 记录当前 tick 计数作为起始点，从下一个 tick 开始计数
+        self._chained_wait_count = count
+        self._chained_wait_event = asyncio.Event()
+        self._chained_wait_started_tick = self._tick_counter  # 记录启动时的 tick，用于跳过当前 tick
+    
+    async def wait_for_chained_ticks(self, timeout: float = 10.0) -> bool:
+        """
+        等待链式等待完成
+        
+        此方法应在下一次 HTTP 请求中调用，以获取上一次链式等待的结果。
+        
+        返回 True 表示成功，False 表示超时或无链式等待。
+        """
+        if self._chained_wait_event is None or self._chained_wait_count <= 0:
+            return False
+        
+        event = self._chained_wait_event
+        try:
+            await asyncio.wait_for(event.wait(), timeout=timeout)
+            return True
+        except asyncio.TimeoutError:
+            return False
+        finally:
+            # 清理链式等待状态
+            self._chained_wait_count = 0
+            self._chained_wait_event = None
+            self._chained_wait_started_tick = -1
 

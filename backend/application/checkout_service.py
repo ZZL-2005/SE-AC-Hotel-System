@@ -143,6 +143,7 @@ class CheckOutService:
         获取房间账单信息。
         """
         accommodation_bill = self.repo.get_latest_accommodation_bill(room_id)
+        accommodation_order = self.repo.get_latest_accommodation_order(room_id)
         
         ac_bills = list(self.repo.list_ac_bills(room_id))
         ac_bill = ac_bills[-1] if ac_bills else None
@@ -151,11 +152,29 @@ class CheckOutService:
 
         acc_bill_data = None
         if accommodation_bill:
+            # 从订单中获取住户信息
+            guest_name = None
+            check_in_time = None
+            nights = 1
+            rate_per_night = self._accommodation_rate()
+            
+            if accommodation_order:
+                guest_name = accommodation_order.get("cust_name")
+                check_in_at = accommodation_order.get("check_in_at")
+                if check_in_at:
+                    check_in_time = check_in_at.isoformat()
+                nights = accommodation_order.get("nights", 1)
+            
             acc_bill_data = {
                 "billId": accommodation_bill["bill_id"],
                 "roomId": accommodation_bill["room_id"],
                 "totalFee": accommodation_bill["total_fee"],
                 "createdAt": accommodation_bill["created_at"].isoformat(),
+                "guestName": guest_name,
+                "checkInTime": check_in_time,
+                "nights": nights,
+                "ratePerNight": rate_per_night,
+                "roomFee": accommodation_bill["total_fee"],
             }
 
         ac_bill_data = None
