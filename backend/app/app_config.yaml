@@ -28,4 +28,4 @@ throttle:
 accommodation:
   rate_per_night: 150.0
 clock:
-  ratio: 10.0
+  ratio: 60.0

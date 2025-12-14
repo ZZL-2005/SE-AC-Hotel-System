@@ -35,12 +35,12 @@ def set_temperature(payload: SetTemperatureRequest) -> Dict[str, Any]:
     
     ⚠️ 危险操作：仅用于调试
     """
-    room = deps.room_repository.get_room(payload.roomId)
+    room = deps.repository.get_room(payload.roomId)
     if not room:
         return {"error": f"Room {payload.roomId} not found"}
     
     room.current_temp = payload.temperature
-    deps.room_repository.save_room(room)
+    deps.repository.save_room(room)
     
     return {
         "success": True,
@@ -178,4 +178,78 @@ def global_power_on() -> Dict[str, Any]:
         "success": success_count,
         "failed": len(results) - success_count,
         "results": results,
+    }
+
+
+@router.post("/system/pause")
+def pause_system() -> Dict[str, Any]:
+    """
+    暂停系统（阻塞 tick 循环）
+    
+    ⚠️ 调试功能：暂停后会完全阻塞 tick 循环，系统进入冻结状态：
+    - tick 计数停止递增
+    - 计时器停止累加
+    - 费用停止计算
+    - 温度停止变化
+    - 调度事件停止触发
+    
+    用于调试时完全冻结系统状态
+    """
+    deps.time_manager.pause_system()
+    
+    return {
+        "success": True,
+        "paused": True,
+        "tick": deps.time_manager.get_tick_counter(),
+        "message": "系统已暂停，tick 循环已阻塞"
+    }
+
+
+@router.post("/system/resume")
+def resume_system() -> Dict[str, Any]:
+    """
+    恢复系统（释放 tick 阻塞）
+    
+    释放 tick 阻塞，系统从暂停点断点继续：
+    - tick 循环恢复运行
+    - 计时器继续累加
+    - 费用继续计算
+    - 温度继续变化
+    - 调度事件继续触发
+    """
+    deps.time_manager.resume_system()
+    
+    return {
+        "success": True,
+        "paused": False,
+        "tick": deps.time_manager.get_tick_counter(),
+        "message": "系统已恢复，tick 循环继续运行"
+    }
+
+
+@router.get("/system/status")
+def system_status() -> Dict[str, Any]:
+    """
+    获取系统状态
+    
+    返回系统是否暂停、当前 tick 计数等信息
+    """
+    return {
+        "paused": deps.time_manager.is_paused(),
+        "tick": deps.time_manager.get_tick_counter(),
+        "tickInterval": deps.time_manager.get_tick_interval(),
+        "timerStats": deps.time_manager.get_timer_stats(),
+    }
+
+
+@router.get("/timers/details")
+def get_timer_details() -> Dict[str, Any]:
+    """
+    获取详细的计时器信息
+    
+    返回所有活动计时器的详细信息，包括服务计时器和等待计时器
+    """
+    timer_details = deps.time_manager.get_all_timer_details()
+    return {
+        "timers": timer_details
     }

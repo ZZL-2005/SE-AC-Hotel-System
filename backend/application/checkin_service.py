@@ -71,7 +71,7 @@ class CheckInService:
         room.initial_temp = initial_temp
         room.current_temp = initial_temp
         # 不要重置 target_temp，保留现有值或由 power_on 时决定
-        # room.target_temp = initial_temp 
+        room.target_temp = self.config.temperature.get("default_target", 25.0)
         room.speed = "MID"
         room.total_fee = 0.0
         room.is_serving = False

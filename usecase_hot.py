@@ -230,7 +230,7 @@ def main() -> None:
     
     open_rooms(ROOM_PRESETS)
     check_in_rooms(ROOM_PRESETS)
-    simulate_timeline(clock_ratio, max_minutes=args.max_minutes)
+    simulate_timeline(clock_ratio, max_minutes=args.max_minutes, step_by_step=args.step_by_step)
 
 
 def parse_args() -> argparse.Namespace:
@@ -239,6 +239,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dry-run", action="store_true", help="Print requests without sending")
     parser.add_argument("--base-url", type=str, default=None, help="Override backend base URL (e.g. http://localhost:8000)")
     parser.add_argument("--max-minutes", type=int, default=None, help="Limit replay to N minutes")
+    parser.add_argument("--step-by-step", action="store_true", help="Enable step-by-step debugging mode (pause system after each minute)")
     return parser.parse_args()
 
 
@@ -365,14 +366,79 @@ def check_in_rooms(presets: Iterable[Dict[str, Any]]) -> None:
 
 # --- Timeline execution ---------------------------------------------------
 
-def simulate_timeline(clock_ratio: float, max_minutes: Optional[int] = None) -> None:
+def pause_system() -> bool:
+    """暂停系统（调试功能）"""
+    if DRY_RUN:
+        CONSOLE.print(Panel.fit(
+            f"[DRY] POST {BASE_URL}/debug/system/pause",
+            title="Dry Run",
+            border_style="magenta"
+        ))
+        return True
+    
+    try:
+        resp = SESSION.post(f"{BASE_URL}/debug/system/pause", timeout=5)
+        resp.raise_for_status()
+        result = resp.json()
+        CONSOLE.print(Panel(
+            f"[yellow]⏸️  系统已暂停[/]\n"
+            f"Tick: {result.get('tick', 'N/A')}\n"
+            f"{result.get('message', '')}",
+            title="🛑 System Paused",
+            border_style="yellow"
+        ))
+        return True
+    except requests.RequestException as exc:
+        CONSOLE.print(Panel(
+            f"[red]⚠ 暂停系统失败:[/]\n{exc}",
+            title="Error",
+            border_style="red"
+        ))
+        return False
+
+
+def resume_system() -> bool:
+    """恢复系统（调试功能）"""
+    if DRY_RUN:
+        CONSOLE.print(Panel.fit(
+            f"[DRY] POST {BASE_URL}/debug/system/resume",
+            title="Dry Run",
+            border_style="magenta"
+        ))
+        return True
+    
+    try:
+        resp = SESSION.post(f"{BASE_URL}/debug/system/resume", timeout=5)
+        resp.raise_for_status()
+        result = resp.json()
+        CONSOLE.print(Panel(
+            f"[green]▶️  系统已恢复[/]\n"
+            f"Tick: {result.get('tick', 'N/A')}\n"
+            f"{result.get('message', '')}",
+            title="✅ System Resumed",
+            border_style="green"
+        ))
+        return True
+    except requests.RequestException as exc:
+        CONSOLE.print(Panel(
+            f"[red]⚠ 恢复系统失败:[/]\n{exc}",
+            title="Error",
+            border_style="red"
+        ))
+        return False
+
+
+def simulate_timeline(clock_ratio: float, max_minutes: Optional[int] = None, step_by_step: bool = False) -> None:
     minute_step = 60.0 / max(clock_ratio, 0.01)
     max_minute = max(TIMELINE.keys(), default=0)
     if max_minutes is not None:
         max_minute = min(max_minute, max_minutes)
     
+    # 当前时钟倍率（单步调试模式下可动态调整）
+    current_clock_ratio = clock_ratio
+    
     CONSOLE.print(Panel.fit(
-        f"minutes={max_minute}\nclockRatio={clock_ratio}\nminute_step={minute_step:.2f}s\nDRY_RUN={DRY_RUN}", 
+        f"minutes={max_minute}\nclockRatio={clock_ratio}\nminute_step={minute_step:.2f}s\nDRY_RUN={DRY_RUN}\nSTEP_BY_STEP={step_by_step}", 
         title="Starting Timeline", 
         border_style="cyan"
     ))
@@ -397,7 +463,8 @@ def simulate_timeline(clock_ratio: float, max_minutes: Optional[int] = None) -> 
         
         # 使用时钟同步+快照接口，每分钟都等待 60 个 tick 完成（1 分钟业务时间）并在 tick 线程中立即采集快照
         if not DRY_RUN:
-            tick_interval = 60.0 / max(clock_ratio, 0.01) / 60  # 计算每个 tick 的时间
+            # 计算基于当前时钟倍率的 tick 间隔
+            tick_interval = 60.0 / max(current_clock_ratio, 0.01) / 60  # 计算每个 tick 的时间
             expected_time = 60 * tick_interval
             # 超时时间设置为预期时间的 20 倍，确保即使 CPU 负载很高也不会超时
             timeout = max(30.0, expected_time * 20)
@@ -431,6 +498,72 @@ def simulate_timeline(clock_ratio: float, max_minutes: Optional[int] = None) -> 
                         border_style="red"
                     ))
                     time.sleep(minute_step)
+            
+            # 单步调试模式：每分钟后暂停系统，等待用户确认
+            if step_by_step:
+                pause_system()
+                
+                # 显示当前状态和可用命令
+                CONSOLE.print(Panel(
+                    f"[cyan]📍 已完成分钟 {minute}[/]\n"
+                    f"[yellow]系统已暂停，可以查看调试管理员界面检查状态[/]\n\n"
+                    f"[bold]当前时钟倍率:[/] [green]{current_clock_ratio}x[/] (1分钟 ≈ {60.0/max(current_clock_ratio, 0.01):.2f}秒)\n\n"
+                    f"[bold]可用命令:[/]\n"
+                    f"  [green]Enter[/]          - 继续下一分钟\n"
+                    f"  [cyan]speed <ratio>[/]  - 调整时钟倍率 (例如: speed 120)\n"
+                    f"  [magenta]info[/]           - 显示当前配置\n"
+                    f"  [red]q[/]              - 退出测试",
+                    title="⏸️  Step-by-Step Debug Mode",
+                    border_style="cyan"
+                ))
+                
+                while True:
+                    user_input = input("> ").strip()
+                    
+                    if user_input.lower() == 'q':
+                        CONSOLE.print("[yellow]用户中止测试[/]")
+                        return
+                    elif user_input.lower() == 'info':
+                        # 显示当前配置信息
+                        info_table = Table(title="当前配置", box=box.SIMPLE, show_header=False)
+                        info_table.add_row("当前分钟", str(minute))
+                        info_table.add_row("总分钟数", str(max_minute))
+                        info_table.add_row("时钟倍率", f"{current_clock_ratio}x")
+                        info_table.add_row("1分钟耗时", f"{60.0/max(current_clock_ratio, 0.01):.2f}秒")
+                        info_table.add_row("Tick间隔", f"{1.0/current_clock_ratio:.4f}秒")
+                        CONSOLE.print(info_table)
+                    elif user_input.lower().startswith('speed '):
+                        # 调整时钟倍率
+                        try:
+                            parts = user_input.split()
+                            new_ratio = float(parts[1])
+                            if new_ratio <= 0:
+                                CONSOLE.print("[red]❌ 时钟倍率必须大于 0[/]")
+                                continue
+                            if new_ratio > 1000:
+                                CONSOLE.print("[yellow]⚠ 时钟倍率过高可能导致系统不稳定，建议使用 <= 1000[/]")
+                            
+                            # 更新时钟倍率
+                            current_clock_ratio = new_ratio
+                            configure_tick_interval(current_clock_ratio)
+                            
+                            CONSOLE.print(Panel(
+                                f"[green]✅ 时钟倍率已调整为 {current_clock_ratio}x[/]\n"
+                                f"1分钟业务时间 ≈ {60.0/max(current_clock_ratio, 0.01):.2f}秒真实时间\n"
+                                f"Tick间隔: {1.0/current_clock_ratio:.4f}秒",
+                                title="⚡ Speed Updated",
+                                border_style="green"
+                            ))
+                        except (ValueError, IndexError):
+                            CONSOLE.print("[red]❌ 无效的命令格式。使用: speed <数字>[/]")
+                    elif user_input == '':
+                        # 按 Enter 继续
+                        break
+                    else:
+                        CONSOLE.print("[yellow]⚠ 未知命令。可用命令: Enter, speed <ratio>, info, q[/]")
+                
+                # 恢复系统继续
+                resume_system()
         else:
             CONSOLE.print(Panel(
                 f"[yellow]DRY_RUN 模式: 跳过 wait_for_tick_and_snapshot (minute={minute})[/]",
@@ -500,16 +633,11 @@ def send_action(action: Dict[str, Any]) -> None:
 
 def wait_for_tick_and_snapshot(minute: int, count: int = 1, timeout: float = 5.0) -> bool:
     """
-<<<<<<< HEAD
-    等待指定数量的 tick 完成并立即采集快照(原子操作)。
-
-=======
     等待指定数量的 tick 完成并在 tick 线程中立即采集快照(阻塞 tick)
     
     通过在 tick 线程中同步执行快照采集,确保快照时间戳与 tick 推进完全一致,
     完全消除了异步等待和快照采集之间可能产生的额外 tick 导致的时间偏移。
     
->>>>>>> 2e46a1e9030c96dfa8be2834efd492908b15f231
     参数:
     - minute: 当前分钟数(用于显示)
     - count: 要等待的 tick 数量

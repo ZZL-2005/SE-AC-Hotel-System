@@ -1,11 +1,21 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { useAuth } from "../contexts/AuthContext";
 import { monitorClient } from "../api/monitorClient";
 import { acClient } from "../api/acClient";
 import { frontdeskClient } from "../api/frontdeskClient";
-import { debugClient } from "../api/debugClient";
-import { adminClient } from "../api/adminClient";
+import { debugClient, type TimerDetail, type SystemStatus } from "../api/debugClient";
 import type { RoomStatus } from "../types/rooms";
+
+interface QueueItem {
+  roomId: string;
+  speed: string;
+  status: string;
+  servedSeconds?: number;
+  waitedSeconds?: number;
+  priorityToken: number;
+  timeSliceEnforced: boolean;
+  timerId: string;
+}
 
 export function DebugAdminPage() {
   const { selectedRoomId, setSelectedRoomId } = useAuth();
@@ -18,15 +28,28 @@ export function DebugAdminPage() {
   const [targetTemp, setTargetTemp] = useState(24);
   const [speed, setSpeed] = useState("MID");
   
-  // 快捷入住表单
-  const [custName, setCustName] = useState("");
-  
-  // 批量入住
-  const [batchRoomIds, setBatchRoomIds] = useState("");
+  // 用于保持滑动条状态，避免数据更新时重置
+  const tempSliderRef = useRef<HTMLInputElement>(null);
+  const isAdjustingTemp = useRef(false);
+  const hasManuallyChangedTemp = useRef(false); // 标记用户是否手动修改过温度
   
   // 直接调节
   const [manualTemp, setManualTemp] = useState("");
   const [manualFee, setManualFee] = useState("");
+  
+  // TimeManager 状态
+  const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null);
+  const [timerDetails, setTimerDetails] = useState<TimerDetail[]>([]);
+  // 新增队列状态状态变量
+  const [queueStatus, setQueueStatus] = useState<{ serviceQueue: QueueItem[], waitingQueue: QueueItem[] }>({ serviceQueue: [], waitingQueue: [] });
+  
+  // 右键菜单状态
+  const [contextMenu, setContextMenu] = useState<{
+    visible: boolean;
+    x: number;
+    y: number;
+    roomId: string;
+  } | null>(null);
 
   // 加载房间列表
   const loadRooms = useCallback(async () => {
@@ -37,7 +60,10 @@ export function DebugAdminPage() {
         const room = data.rooms.find(r => r.roomId === selectedRoomId);
         if (room) {
           setSelectedRoom(room);
-          setTargetTemp(room.targetTemp || 24);
+          // 只有当用户不在调节温度且未手动修改过温度时才更新滑动条
+          if (!isAdjustingTemp.current && !hasManuallyChangedTemp.current) {
+            setTargetTemp(room.targetTemp || 24);
+          }
         }
       }
     }
@@ -55,31 +81,121 @@ export function DebugAdminPage() {
     setAllRooms(roomList);
   }, [rooms]);
 
+  // 加载 TimeManager 状态
+  const loadSystemStatus = useCallback(async () => {
+    const { data } = await debugClient.getSystemStatus();
+    if (data) {
+      setSystemStatus(data);
+    }
+  }, []);
+
+  // 加载计时器详情
+  const loadTimers = useCallback(async () => {
+    try {
+      const { data, error } = await debugClient.getTimerDetails();
+      if (error) {
+        console.error("[Debug] Failed to load timer details:", error);
+        return;
+      }
+      setTimerDetails(data?.timers || []);
+    } catch (err) {
+      console.error("[Debug] Error loading timer details:", err);
+    }
+  }, []);
+
+  // 新增加载队列状态的函数
+  const loadQueueStatus = useCallback(async () => {
+    try {
+      const { data, error } = await debugClient.getQueueStatus();
+      if (error) {
+        console.error("[Debug] Failed to load queue status:", error);
+        return;
+      }
+      setQueueStatus(data || { serviceQueue: [], waitingQueue: [] });
+    } catch (err) {
+      console.error("[Debug] Error loading queue status:", err);
+    }
+  }, []);
+
   useEffect(() => {
-    loadRooms();
-  }, [loadRooms]);
+    const interval = window.setInterval(() => {
+      loadTimers();
+      loadQueueStatus(); // 定时加载队列状态
+      loadRooms();
+      loadSystemStatus();
+    }, 1000);
+
+    return () => window.clearInterval(interval);
+  }, [loadRooms, loadSystemStatus, loadTimers, loadQueueStatus]);
 
   useEffect(() => {
     loadAllRooms();
   }, [loadAllRooms]);
-
-  useEffect(() => {
-    const interval = setInterval(() => {
-      loadRooms();
-    }, 2000);
-    return () => clearInterval(interval);
-  }, [loadRooms]);
 
   const handleRoomSelect = (roomId: string) => {
     setSelectedRoomId(roomId);
     const room = rooms.find(r => r.roomId === roomId);
     if (room) {
       setSelectedRoom(room);
+      // 切换房间时重置温度并清除手动修改标记
       setTargetTemp(room.targetTemp || 24);
+      hasManuallyChangedTemp.current = false;
+    }
+  };
+
+  // 处理右键菜单
+  const handleContextMenu = (e: React.MouseEvent, roomId: string, isOccupied: boolean) => {
+    e.preventDefault();
+    // 只对未入住的房间显示右键菜单
+    if (!isOccupied) {
+      setContextMenu({
+        visible: true,
+        x: e.clientX,
+        y: e.clientY,
+        roomId,
+      });
+    }
+  };
+
+  // 关闭右键菜单
+  const closeContextMenu = () => {
+    setContextMenu(null);
+  };
+
+  // 快捷入住
+  const handleQuickCheckin = async (roomId: string) => {
+    closeContextMenu();
+    try {
+      const { error } = await frontdeskClient.checkIn({
+        custId: `DBG${Date.now()}`,
+        custName: `调试用户-${roomId}`,
+        guestCount: 1,
+        checkInDate: new Date().toISOString(),
+        roomId: roomId,
+        deposit: 0,
+      });
+      if (error) {
+        setMessage(`❌ 入住失败: ${error}`);
+      } else {
+        setMessage(`✅ 房间 ${roomId} 入住成功`);
+        loadRooms();
+        loadAllRooms();
+      }
+    } catch (err) {
+      setMessage(`❌ 入住失败: ${err}`);
     }
   };
 
   // 空调控制
+  // 点击其他地方关闭右键菜单
+  useEffect(() => {
+    const handleClick = () => closeContextMenu();
+    if (contextMenu?.visible) {
+      document.addEventListener('click', handleClick);
+      return () => document.removeEventListener('click', handleClick);
+    }
+  }, [contextMenu]);
+
   const handlePowerOn = async () => {
     if (!selectedRoomId) return;
     const { error } = await acClient.powerOn(selectedRoomId);
@@ -101,6 +217,8 @@ export function DebugAdminPage() {
     const { error } = await acClient.changeTemp(selectedRoomId, targetTemp);
     if (error) setMessage(`❌ ${error}`);
     else setMessage("✅ 温度已调节");
+    // 温度调节成功后清除手动修改标记，允许后续更新
+    hasManuallyChangedTemp.current = false;
     loadRooms();
   };
 
@@ -110,68 +228,6 @@ export function DebugAdminPage() {
     if (error) setMessage(`❌ ${error}`);
     else setMessage("✅ 风速已调节");
     loadRooms();
-  };
-
-  // 快捷入住
-  const handleQuickCheckin = async () => {
-    if (!selectedRoomId) return;
-    const { error } = await frontdeskClient.checkIn({
-      custId: `DBG${Date.now()}`,
-      custName: custName || "调试用户",
-      guestCount: 1,
-      checkInDate: new Date().toISOString(),
-      roomId: selectedRoomId,
-      deposit: 0,
-    });
-    if (error) setMessage(`❌ ${error}`);
-    else setMessage("✅ 快捷入住成功");
-    setCustName("");
-    loadRooms();
-  };
-
-  // 批量入住
-  const handleBatchCheckin = async () => {
-    if (!batchRoomIds.trim()) return;
-    
-    const roomIds = batchRoomIds.split(/[,\s]+/).filter(id => id.trim());
-    if (roomIds.length === 0) {
-      setMessage("❌ 请输入有效的房间号");
-      return;
-    }
-    
-    try {
-      const { error } = await debugClient.batchCheckin({ roomIds });
-      if (error) {
-        setMessage(`❌ ${error}`);
-      } else {
-        setMessage(`✅ 批量入住成功: ${roomIds.length} 个房间`);
-        setBatchRoomIds("");
-        // 重新加载房间状态
-        loadRooms();
-      }
-    } catch (err) {
-      setMessage(`❌ 批量入住失败: ${err}`);
-    }
-  };
-
-  // 快捷批量入住
-  const handleQuickBatchCheckin = async (start: number, end: number) => {
-    const roomIds = [];
-    for (let i = start; i <= end; i++) {
-      roomIds.push(String(i));
-    }
-    
-    try {
-      const { error } = await debugClient.batchCheckin({ roomIds });
-      if (error) {
-        setMessage(`❌ ${error}`);
-      } else {
-        setMessage(`✅ 批量入住成功: ${roomIds.length} 个房间 (${start}-${end})`);
-        loadRooms();
-      }
-    } catch (err) {
-      setMessage(`❌ 批量入住失败: ${err}`);
-    }
   };
 
   // 直接调节温度
@@ -202,6 +258,22 @@ export function DebugAdminPage() {
     loadRooms();
   };
 
+  // 暂停系统
+  const handlePauseSystem = async () => {
+    const { error } = await debugClient.pauseSystem();
+    if (error) setMessage(`❌ ${error}`);
+    else setMessage("✅ 系统已暂停");
+    loadSystemStatus();
+  };
+
+  // 恢复系统
+  const handleResumeSystem = async () => {
+    const { error } = await debugClient.resumeSystem();
+    if (error) setMessage(`❌ ${error}`);
+    else setMessage("✅ 系统已恢复");
+    loadSystemStatus();
+  };
+
   return (
     <div className="h-screen bg-[#1e1e1e] text-[#d4d4d4] flex flex-col">
       {/* 顶部栏 */}
@@ -221,7 +293,7 @@ export function DebugAdminPage() {
       </div>
 
       {/* 主内容区 - 三栏布局 */}
-      <div className="flex-1 flex overflow-hidden">
+      <div className="flex-1 flex overflow-hidden" onClick={closeContextMenu}>
         {/* 左侧：房间选择器 */}
         <div className="w-64 bg-[#252526] border-r border-[#3e3e42] flex flex-col">
           <div className="px-3 py-2 text-xs font-medium border-b border-[#3e3e42] flex items-center justify-between">
@@ -237,6 +309,7 @@ export function DebugAdminPage() {
                 <button
                   key={room.roomId}
                   onClick={() => isOccupied && handleRoomSelect(room.roomId)}
+                  onContextMenu={(e) => handleContextMenu(e, room.roomId, isOccupied)}
                   className={`w-full px-3 py-2 text-left text-xs flex items-center justify-between hover:bg-[#2a2d2e] ${
                     selectedRoomId === room.roomId ? "bg-[#37373d]" : ""
                   } ${
@@ -284,11 +357,19 @@ export function DebugAdminPage() {
             <div className="space-y-2">
               <label className="text-xs text-[#858585]">目标温度: {targetTemp}°C</label>
               <input
+                ref={tempSliderRef}
                 type="range"
                 min="16"
                 max="30"
                 value={targetTemp}
-                onChange={(e) => setTargetTemp(Number(e.target.value))}
+                onChange={(e) => {
+                  setTargetTemp(Number(e.target.value));
+                  hasManuallyChangedTemp.current = true; // 标记用户已手动修改
+                }}
+                onMouseDown={() => { isAdjustingTemp.current = true; }}
+                onMouseUp={() => { isAdjustingTemp.current = false; }}
+                onTouchStart={() => { isAdjustingTemp.current = true; }}
+                onTouchEnd={() => { isAdjustingTemp.current = false; }}
                 className="w-full"
               />
               <button
@@ -320,76 +401,66 @@ export function DebugAdminPage() {
             </div>
           </div>
 
-          {/* 批量入住 */}
+          {/* 服务队列 */}
           <div className="bg-[#252526] rounded p-4 space-y-3">
-            <h3 className="text-sm font-medium mb-2">批量入住</h3>
-            
-            {/* 快捷批量按钮 */}
-            <div className="space-y-2">
-              <label className="text-xs text-[#858585]">快捷批量入住</label>
-              <div className="grid grid-cols-2 gap-2">
-                <button
-                  onClick={() => handleQuickBatchCheckin(1, 10)}
-                  className="bg-[#3e3e42] hover:bg-[#505050] px-3 py-2 rounded text-xs"
-                >
-                  1-10
-                </button>
-                <button
-                  onClick={() => handleQuickBatchCheckin(11, 20)}
-                  className="bg-[#3e3e42] hover:bg-[#505050] px-3 py-2 rounded text-xs"
-                >
-                  11-20
-                </button>
-                <button
-                  onClick={() => handleQuickBatchCheckin(1, 50)}
-                  className="bg-[#3e3e42] hover:bg-[#505050] px-3 py-2 rounded text-xs"
-                >
-                  1-50
-                </button>
-                <button
-                  onClick={() => handleQuickBatchCheckin(1, 100)}
-                  className="bg-[#0e639c] hover:bg-[#1177bb] px-3 py-2 rounded text-xs"
-                >
-                  全部100间
-                </button>
-              </div>
-            </div>
-
-            {/* 自定义批量 */}
-            <div className="space-y-2 pt-2 border-t border-[#3e3e42]">
-              <label className="text-xs text-[#858585]">自定义房间号</label>
-              <textarea
-                placeholder="输入房间号，用逗号或空格分隔，例如: 1, 2, 3"
-                value={batchRoomIds}
-                onChange={(e) => setBatchRoomIds(e.target.value)}
-                className="w-full h-16 bg-[#3c3c3c] border border-[#3e3e42] rounded px-2 py-1 text-xs"
-              />
-              <button
-                onClick={handleBatchCheckin}
-                className="w-full bg-[#0e639c] hover:bg-[#1177bb] px-3 py-2 rounded text-xs"
-              >
-                批量入住
-              </button>
+            <h3 className="text-sm font-medium mb-2">🔵 服务队列</h3>
+            <div className="space-y-2 max-h-64 overflow-y-auto">
+              {queueStatus.serviceQueue.length === 0 ? (
+                <div className="text-xs text-[#858585] text-center py-2">队列为空</div>
+              ) : (
+                queueStatus.serviceQueue.map((service) => (
+                  <div key={service.roomId} className="bg-[#1e1e1e] rounded p-3 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm font-medium text-[#4ec9b0]">房间 {service.roomId}</span>
+                      <span className="text-[10px] px-2 py-0.5 rounded bg-[#4ec9b0] text-black">
+                        {service.speed}
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2 text-xs">
+                      <div>
+                        <span className="text-[#858585]">服务时长:</span>
+                        <span className="ml-2 font-mono text-[#dcdcaa]">{Math.floor((service.servedSeconds || 0) / 60)}分{(service.servedSeconds || 0) % 60}秒</span>
+                      </div>
+                      <div>
+                        <span className="text-[#858585]">优先级:</span>
+                        <span className="ml-2 font-mono text-[#ce9178]">{service.priorityToken}</span>
+                      </div>
+                    </div>
+                  </div>
+                ))
+              )}
             </div>
           </div>
 
-          {/* 快捷入住 */}
+          {/* 等待队列 */}
           <div className="bg-[#252526] rounded p-4 space-y-3">
-            <h3 className="text-sm font-medium mb-2">快捷入住</h3>
-            <input
-              type="text"
-              placeholder="客户姓名（可选）"
-              value={custName}
-              onChange={(e) => setCustName(e.target.value)}
-              className="w-full bg-[#3c3c3c] border border-[#3e3e42] rounded px-2 py-1 text-xs"
-            />
-            <button
-              onClick={handleQuickCheckin}
-              className="w-full bg-[#0e639c] hover:bg-[#1177bb] px-3 py-2 rounded text-xs"
-              disabled={!selectedRoomId}
-            >
-              一键入住
-            </button>
+            <h3 className="text-sm font-medium mb-2">🟡 等待队列</h3>
+            <div className="space-y-2 max-h-64 overflow-y-auto">
+              {queueStatus.waitingQueue.length === 0 ? (
+                <div className="text-xs text-[#858585] text-center py-2">队列为空</div>
+              ) : (
+                queueStatus.waitingQueue.map((wait) => (
+                  <div key={wait.roomId} className="bg-[#1e1e1e] rounded p-3 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm font-medium text-[#ce9178]">房间 {wait.roomId}</span>
+                      <span className="text-[10px] px-2 py-0.5 rounded bg-[#ce9178] text-black">
+                        {wait.speed}
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2 text-xs">
+                      <div>
+                        <span className="text-[#858585]">已等待:</span>
+                        <span className="ml-2 font-mono text-[#dcdcaa]">{Math.floor((wait.waitedSeconds || 0) / 60)}分{(wait.waitedSeconds || 0) % 60}秒</span>
+                      </div>
+                      <div>
+                        <span className="text-[#858585]">优先级:</span>
+                        <span className="ml-2 font-mono text-[#ce9178]">{wait.priorityToken}</span>
+                      </div>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
           </div>
 
           {/* 危险区域：直接调节 */}
@@ -439,7 +510,114 @@ export function DebugAdminPage() {
         </div>
 
         {/* 右侧：状态监控 */}
-        <div className="w-80 bg-[#252526] border-l border-[#3e3e42] p-4 space-y-4 overflow-y-auto">
+        <div className="w-96 bg-[#252526] border-l border-[#3e3e42] p-4 space-y-4 overflow-y-auto">
+          {/* TimeManager 状态 */}
+          <div className="bg-[#1e1e1e] rounded p-3 space-y-3">
+            <div className="flex items-center justify-between">
+              <h3 className="text-xs font-medium text-[#858585]">⏱️ TimeManager 状态</h3>
+              {systemStatus && (
+                <span className={`text-[10px] px-2 py-0.5 rounded ${
+                  systemStatus.paused 
+                    ? "bg-[#be1100] text-white" 
+                    : "bg-[#4ec9b0] text-black"
+                }`}>
+                  {systemStatus.paused ? "⏸️ 已暂停" : "▶️ 运行中"}
+                </span>
+              )}
+            </div>
+            
+            {systemStatus && (
+              <div className="space-y-1 text-xs">
+                <div className="flex justify-between">
+                  <span>Tick 计数:</span>
+                  <span className="text-[#4ec9b0] font-mono">{systemStatus.tick}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span>Tick 间隔:</span>
+                  <span className="text-[#dcdcaa] font-mono">{systemStatus.tickInterval.toFixed(3)}s</span>
+                </div>
+                <div className="flex justify-between">
+                  <span>总计时器:</span>
+                  <span className="text-[#ce9178]">{systemStatus.timerStats.totalTimers}</span>
+                </div>
+                {systemStatus.timerStats.byType && Object.entries(systemStatus.timerStats.byType).map(([type, count]) => (
+                  <div key={type} className="flex justify-between pl-4 text-[11px]">
+                    <span className="text-[#858585]">{type}:</span>
+                    <span>{count}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+            
+            {/* 系统控制按钮 */}
+            <div className="pt-2 border-t border-[#3e3e42] flex gap-2">
+              {systemStatus?.paused ? (
+                <button
+                  onClick={handleResumeSystem}
+                  className="flex-1 bg-[#4ec9b0] hover:bg-[#5ed9c0] text-black px-3 py-1.5 rounded text-xs font-medium"
+                >
+                  ▶️ 恢复系统
+                </button>
+              ) : (
+                <button
+                  onClick={handlePauseSystem}
+                  className="flex-1 bg-[#be1100] hover:bg-[#d13f25] px-3 py-1.5 rounded text-xs font-medium"
+                >
+                  ⏸️ 暂停系统
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* 计时器详情 */}
+          <div className="bg-[#1e1e1e] rounded p-3 space-y-2">
+            <h3 className="text-xs font-medium text-[#858585]">🗒️ 计时器详情 ({timerDetails.length})</h3>
+            <div className="space-y-2 max-h-64 overflow-y-auto">
+              {timerDetails.length === 0 ? (
+                <div className="text-xs text-[#858585] text-center py-2">暂无计时器</div>
+              ) : (
+                timerDetails.map((timer) => (
+                  <div key={timer.timer_id} className="bg-[#252526] rounded p-2 space-y-1">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] font-mono text-[#4ec9b0]">{timer.room_id}</span>
+                      <span className={`text-[9px] px-1.5 py-0.5 rounded ${
+                        timer.type === 'SERVICE' ? 'bg-[#4ec9b0] text-black' :
+                        timer.type === 'WAIT' ? 'bg-[#ce9178] text-black' :
+                        timer.type === 'DETAIL' ? 'bg-[#dcdcaa] text-black' :
+                        'bg-[#858585] text-white'
+                      }`}>
+                        {timer.type}
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-1 text-[10px]">
+                      {timer.speed && (
+                        <>
+                          <span className="text-[#858585]">风速:</span>
+                          <span>{timer.speed}</span>
+                        </>
+                      )}
+                      <span className="text-[#858585]">已过:</span>
+                      <span className="font-mono">{timer.elapsed}s</span>
+                      {timer.remaining > 0 && (
+                        <>
+                          <span className="text-[#858585]">剩余:</span>
+                          <span className="font-mono">{timer.remaining}s</span>
+                        </>
+                      )}
+                      {timer.fee > 0 && (
+                        <>
+                          <span className="text-[#858585]">费用:</span>
+                          <span className="font-mono text-[#dcdcaa]">¥{timer.fee.toFixed(2)}</span>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+
+          {/* 房间状态 */}
           {selectedRoom && (
             <>
               <div className="bg-[#1e1e1e] rounded p-3 space-y-2">
@@ -481,6 +659,26 @@ export function DebugAdminPage() {
           )}
         </div>
       </div>
+
+      {/* 右键菜单 */}
+      {contextMenu?.visible && (
+        <div
+          className="fixed bg-[#252526] border border-[#3e3e42] rounded shadow-lg py-1 z-50"
+          style={{
+            left: `${contextMenu.x}px`,
+            top: `${contextMenu.y}px`,
+          }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <button
+            onClick={() => handleQuickCheckin(contextMenu.roomId)}
+            className="w-full px-4 py-2 text-xs text-left hover:bg-[#2a2d2e] flex items-center gap-2"
+          >
+            <span>🚪</span>
+            <span>办理入住</span>
+          </button>
+        </div>
+      )}
     </div>
   );
 }

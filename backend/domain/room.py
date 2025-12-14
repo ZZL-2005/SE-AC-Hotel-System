@@ -27,7 +27,9 @@ class Room:
     active_service_id: Optional[str] = None
     last_temp_change_timestamp: Optional[datetime] = None
     pending_target_temp: Optional[float] = None
-    manual_powered_off: bool = False  # 空调是否被用户开启（用于控制自动重启）
+    # 空调是否被用户开启（用于控制自动重启）
+    powered_on: bool = False
+    manual_powered_off: bool = False
     metadata: dict = field(default_factory=dict)
 
     def mark_occupied(self, initial_temp: Optional[float] = None) -> None:
@@ -114,16 +116,23 @@ class Room:
     # 温控规则（来自 PPT）：偏离 ≥ 阈值时自动重启
     def needs_auto_restart(self, threshold: float) -> bool:
         """判断当前温度是否相对目标温度偏离超过阈值，用于自动重启送风。"""
-        return abs(self.current_temp - self.target_temp) >= threshold
+        if self.powered_on and not self.manual_powered_off:
+            return abs(self.current_temp - self.target_temp) >= threshold
+        return False
 
     def _move_towards(self, target: float, delta_per_sec: float) -> bool:
-        """按给定步长向目标温度靠近，返回是否"刚刚"到达目标（不是已经在目标）。"""
+        """按给定步长向目标温度靠近，返回是否“刚刚”到达目标（不是已经在目标）。"""
         if delta_per_sec <= 0:
-            return False  # 无变化，不算"到达"
+            return False  # 无变化，不算“到达”
         difference = target - self.current_temp
         # 如果已经在目标温度，返回 False（避免重复触发事件）
-        if abs(difference) < 1e-6:
-            return False
+        # 使用 0.01°C 作为容差阈值，解决浮点数精度问题
+        if abs(difference) < 0.01:
+            # 如果已经非常接近目标，直接设置为目标值
+            if abs(difference) > 0:
+                self.current_temp = target
+                return True  # 微小调整到达目标
+            return False  # 已经在目标，不重复触发
         # 如果差距在一步之内，则到达目标
         if abs(difference) <= delta_per_sec:
             self.current_temp = target

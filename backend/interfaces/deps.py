@@ -72,6 +72,9 @@ scheduler.set_queues(service_queue, waiting_queue)
 scheduler.set_room_repository(repository)
 scheduler.set_billing_service(billing_service)
 
+# 设置 TimeManager 对 Scheduler 的引用（用于获取锁）
+time_manager.set_scheduler(scheduler)
+
 # 创建空调服务
 ac_service = UseACService(settings, scheduler, repository, billing_service)
 

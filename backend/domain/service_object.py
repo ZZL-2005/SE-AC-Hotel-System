@@ -40,6 +40,7 @@ class ServiceObject:
     @property
     def served_seconds(self) -> int:
         """服务时长（从 TimeManager 查询）"""
+        # print("getting served_seconds", self._timer_handle, self._timer_handle.is_valid)
         if self._timer_handle and self._timer_handle.is_valid:
             return self._timer_handle.elapsed_seconds
         return 0
@@ -83,6 +84,8 @@ class ServiceObject:
         if self._timer_handle:
             self._timer_handle.cancel()
             self._timer_handle = None
+        else:
+            return self.timer_id
         self.timer_id = None
 
     @property

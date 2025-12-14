@@ -478,6 +478,24 @@ async def wait_for_tick_and_snapshot(
     )
 
 
+@router.get("/queues")
+def get_queue_status() -> Dict[str, List[Dict[str, Any]]]:
+    """
+    获取服务队列和等待队列的当前状态
+    
+    返回:
+    - serviceQueue: 服务队列中的所有房间
+    - waitingQueue: 等待队列中的所有房间
+    """
+    service_queue_status = deps.scheduler.get_service_queue_status()
+    waiting_queue_status = deps.scheduler.get_waiting_queue_status()
+    
+    return {
+        "serviceQueue": service_queue_status,
+        "waitingQueue": waiting_queue_status
+    }
+
+
 def _derive_status(room: RoomModel, service, wait) -> str:
     if service:
         return "serving"

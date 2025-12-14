@@ -67,7 +67,7 @@ HYPERPARAM_OVERRIDES: Dict[str, float] = {
     # 住宿默认单价（单房自定义仍通过 open_room 设置）
     "ratePerNight": 150.0,
     # 时钟倍率：ratio=60 代表 1 分钟的业务时间约等于 1 秒真实时间
-    "clockRatio": 10.0,
+    "clockRatio": 60.0,
 }
 
 # ---------------------------------------------------------------------------
@@ -230,7 +230,7 @@ def main() -> None:
     
     open_rooms(ROOM_PRESETS)
     check_in_rooms(ROOM_PRESETS)
-    simulate_timeline_minute_start(clock_ratio, max_minutes=args.max_minutes)
+    simulate_timeline_minute_start(clock_ratio, max_minutes=args.max_minutes, step_by_step=args.step_by_step)
 
 
 def parse_args() -> argparse.Namespace:
@@ -239,6 +239,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dry-run", action="store_true", help="Print requests without sending")
     parser.add_argument("--base-url", type=str, default=None, help="Override backend base URL (e.g. http://localhost:8000)")
     parser.add_argument("--max-minutes", type=int, default=None, help="Limit replay to N minutes")
+    parser.add_argument("--step-by-step", action="store_true", help="Enable step-by-step debugging mode (pause system after each minute)")
     return parser.parse_args()
 
 
@@ -752,15 +753,24 @@ def export_excel_snapshots(rows: List[Dict[str, Any]], filename: str = "snapshot
     for m in minutes_full:
         ws.cell(row=current_row, column=1, value=m)
         col = 2
-        # 构建本分钟的队列字符串：房间ID/时间（秒），仅展示在一行的“服务队列/等待队列”列
+        # 构建本分钟的队列字符串：房间ID/时间（秒），仅展示在一行的"服务队列/等待队列"列
+        # 修正：每个房间在每分钟只应该出现一次，分别在服务队列或等待队列中
         minute_rows = [r for r in rows if r["minute"] == m]
         serving_pairs = []
         waiting_pairs = []
+        room_ids_processed = set()
         for r in minute_rows:
+            room_id = r['roomId']
+            # 避免重复处理同一个房间
+            if room_id in room_ids_processed:
+                continue
+            room_ids_processed.add(room_id)
+            
+            # 根据房间的当前状态将其添加到相应的队列中
             if r.get("isServing"):
-                serving_pairs.append(f"R{r['roomId']}/{int(r.get('servedSeconds', 0))}")
-            if r.get("isWaiting"):
-                waiting_pairs.append(f"R{r['roomId']}/{int(r.get('waitedSeconds', 0))}")
+                serving_pairs.append(f"R{room_id}/{int(r.get('servedSeconds', 0))}")
+            elif r.get("isWaiting"):
+                waiting_pairs.append(f"R{room_id}/{int(r.get('waitedSeconds', 0))}")
         service_str = " ".join(sorted(serving_pairs)) if serving_pairs else ""
         wait_str = " ".join(sorted(waiting_pairs)) if waiting_pairs else ""
 
@@ -813,7 +823,69 @@ def export_excel_snapshots(rows: List[Dict[str, Any]], filename: str = "snapshot
         CONSOLE.print(f"[red]Failed to write Excel: {exc}[/]")
 
 
-def simulate_timeline_minute_start(clock_ratio: float, max_minutes: Optional[int] = None) -> None:
+def pause_system() -> bool:
+    """暂停系统（调试功能）"""
+    if DRY_RUN:
+        CONSOLE.print(Panel.fit(
+            f"[DRY] POST {BASE_URL}/debug/system/pause",
+            title="Dry Run",
+            border_style="magenta"
+        ))
+        return True
+    
+    try:
+        resp = SESSION.post(f"{BASE_URL}/debug/system/pause", timeout=5)
+        resp.raise_for_status()
+        result = resp.json()
+        CONSOLE.print(Panel(
+            f"[yellow]⏸️  系统已暂停[/]\n"
+            f"Tick: {result.get('tick', 'N/A')}\n"
+            f"{result.get('message', '')}",
+            title="🛑 System Paused",
+            border_style="yellow"
+        ))
+        return True
+    except requests.RequestException as exc:
+        CONSOLE.print(Panel(
+            f"[red]⚠ 暂停系统失败:[/]\n{exc}",
+            title="Error",
+            border_style="red"
+        ))
+        return False
+
+
+def resume_system() -> bool:
+    """恢复系统（调试功能）"""
+    if DRY_RUN:
+        CONSOLE.print(Panel.fit(
+            f"[DRY] POST {BASE_URL}/debug/system/resume",
+            title="Dry Run",
+            border_style="magenta"
+        ))
+        return True
+    
+    try:
+        resp = SESSION.post(f"{BASE_URL}/debug/system/resume", timeout=5)
+        resp.raise_for_status()
+        result = resp.json()
+        CONSOLE.print(Panel(
+            f"[green]▶️  系统已恢复[/]\n"
+            f"Tick: {result.get('tick', 'N/A')}\n"
+            f"{result.get('message', '')}",
+            title="✅ System Resumed",
+            border_style="green"
+        ))
+        return True
+    except requests.RequestException as exc:
+        CONSOLE.print(Panel(
+            f"[red]⚠ 恢复系统失败:[/]\n{exc}",
+            title="Error",
+            border_style="red"
+        ))
+        return False
+
+
+def simulate_timeline_minute_start(clock_ratio: float, max_minutes: Optional[int] = None, step_by_step: bool = False) -> None:
     """Replay timeline with snapshots taken at the *start* of each minute.
 
     Row m in Excel represents the state at the beginning of minute m
@@ -826,8 +898,11 @@ def simulate_timeline_minute_start(clock_ratio: float, max_minutes: Optional[int
     if max_minutes is not None:
         max_minute = min(max_minute, max_minutes)
 
+    # 当前时钟倍率（单步调试模式下可动态调整）
+    current_clock_ratio = clock_ratio
+    
     CONSOLE.print(Panel.fit(
-        f"minutes={max_minute}\nclockRatio={clock_ratio}\nminute_step={minute_step:.2f}s\nDRY_RUN={DRY_RUN}\n"
+        f"minutes={max_minute}\nclockRatio={clock_ratio}\nminute_step={minute_step:.2f}s\nDRY_RUN={DRY_RUN}\nSTEP_BY_STEP={step_by_step}\n"
         f"Chain Wait: [green]Enabled[/] (防止漏 tick)",
         title="Starting Timeline (minute-start + chain)",
         border_style="cyan"
@@ -845,7 +920,7 @@ def simulate_timeline_minute_start(clock_ratio: float, max_minutes: Optional[int
     for minute in range(1, max_minute + 1):
         if not DRY_RUN:
             # Advance one business minute (60 ticks) and capture snapshot at the *start* of this minute.
-            tick_interval = 60.0 / max(clock_ratio, 0.01) / 60
+            tick_interval = 60.0 / max(current_clock_ratio, 0.01) / 60
             expected_time = 60 * tick_interval
             timeout = max(30.0, expected_time * 20)
 
@@ -890,6 +965,76 @@ def simulate_timeline_minute_start(clock_ratio: float, max_minutes: Optional[int
                 send_action(action)
         else:
             CONSOLE.print(f"[dim]Minute {minute}: No actions[/]")
+            
+        # 可选：在每分钟操作后抓一份监控视图，方便对照 Excel。
+        if not DRY_RUN:
+            snapshot_rooms(minute)
+            
+        # 单步调试模式：每分钟后暂停系统，等待用户确认
+        if step_by_step and not DRY_RUN:
+            pause_system()
+            
+            # 显示当前状态和可用命令
+            CONSOLE.print(Panel(
+                f"[cyan]📍 已完成分钟 {minute}[/]\n"
+                f"[yellow]系统已暂停，可以查看调试管理员界面检查状态[/]\n\n"
+                f"[bold]当前时钟倍率:[/] [green]{current_clock_ratio}x[/] (1分钟 ≈ {60.0/max(current_clock_ratio, 0.01):.2f}秒)\n\n"
+                f"[bold]可用命令:[/]\n"
+                f"  [green]Enter[/]          - 继续下一分钟\n"
+                f"  [cyan]speed <ratio>[/]  - 调整时钟倍率 (例如: speed 120)\n"
+                f"  [magenta]info[/]           - 显示当前配置\n"
+                f"  [red]q[/]              - 退出测试",
+                title="⏸️  Step-by-Step Debug Mode",
+                border_style="cyan"
+            ))
+            
+            while True:
+                user_input = input("> ").strip()
+                
+                if user_input.lower() == 'q':
+                    CONSOLE.print("[yellow]用户中止测试[/]")
+                    return
+                elif user_input.lower() == 'info':
+                    # 显示当前配置信息
+                    info_table = Table(title="当前配置", box=box.SIMPLE, show_header=False)
+                    info_table.add_row("当前分钟", str(minute))
+                    info_table.add_row("总分钟数", str(max_minute))
+                    info_table.add_row("时钟倍率", f"{current_clock_ratio}x")
+                    info_table.add_row("1分钟耗时", f"{60.0/max(current_clock_ratio, 0.01):.2f}秒")
+                    info_table.add_row("Tick间隔", f"{1.0/current_clock_ratio:.4f}秒")
+                    CONSOLE.print(info_table)
+                elif user_input.lower().startswith('speed '):
+                    # 调整时钟倍率
+                    try:
+                        parts = user_input.split()
+                        new_ratio = float(parts[1])
+                        if new_ratio <= 0:
+                            CONSOLE.print("[red]❌ 时钟倍率必须大于 0[/]")
+                            continue
+                        if new_ratio > 1000:
+                            CONSOLE.print("[yellow]⚠ 时钟倍率过高可能导致系统不稳定，建议使用 <= 1000[/]")
+                        
+                        # 更新时钟倍率
+                        current_clock_ratio = new_ratio
+                        configure_tick_interval(current_clock_ratio)
+                        
+                        CONSOLE.print(Panel(
+                            f"[green]✅ 时钟倍率已调整为 {current_clock_ratio}x[/]\n"
+                            f"1分钟业务时间 ≈ {60.0/max(current_clock_ratio, 0.01):.2f}秒真实时间\n"
+                            f"Tick间隔: {1.0/current_clock_ratio:.4f}秒",
+                            title="⚡ Speed Updated",
+                            border_style="green"
+                        ))
+                    except (ValueError, IndexError):
+                        CONSOLE.print("[red]❌ 无效的命令格式。使用: speed <数字>[/]")
+                elif user_input == '':
+                    # 按 Enter 继续
+                    break
+                else:
+                    CONSOLE.print("[yellow]⚠ 未知命令。可用命令: Enter, speed <ratio>, info, q[/]")
+            
+            # 恢复系统继续
+            resume_system()
 
     # Export Excel using minute-start semantics
     CONSOLE.print("[green]✅ Timeline replay finished (minute-start)[/]")

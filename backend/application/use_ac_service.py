@@ -101,6 +101,8 @@ class UseACService:
 
         temp_cfg = self.config.temperature or {}
         
+        room.powered_on = True
+        
         # 确定模式
         room.mode = mode or room.mode or "cool"
         
@@ -108,10 +110,12 @@ class UseACService:
         if target_temp is not None:
             self._validate_target_temp(target_temp, room.mode)
             room.target_temp = target_temp
+            print(f"[Room {room_id}]Setting target temperature: {room.target_temp}")
         elif room.target_temp is None:
             room.target_temp = float(temp_cfg.get("default_target", 25.0))
+            print(f"[Room {room_id}]Using default target temperature: {room.target_temp}")
         # 否则保留 room.target_temp 不变
-
+        print(f"[Room {room_id}]Using previous target temperature: {room.target_temp}")
         room.speed = speed or room.speed or "MID"
         room.is_serving = False
         room.manual_powered_off = False
@@ -144,6 +148,7 @@ class UseACService:
         room.is_serving = False
         room.status = RoomStatus.OCCUPIED
         room.manual_powered_off = True  # 标记空调已关闭，阻止自动重启
+        room.powered_on = False  # 停止标记已开启
         scheduler = self._ensure_scheduler()
         self.billing_service.close_current_detail_record(room_id, datetime.utcnow())
         self.repo.save_room(room)

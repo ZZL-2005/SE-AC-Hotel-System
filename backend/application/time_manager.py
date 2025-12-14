@@ -61,6 +61,9 @@ class TimeManager:
     _iter_rooms: Callable[[], Iterable["Room"]] = field(default=lambda: [])
     _save_room: Callable[["Room"], None] = field(default=lambda room: None)
     
+    # Scheduler 引用（用于获取锁）
+    _scheduler: Optional["Scheduler"] = None
+    
     # 时钟同步机制
     _tick_counter: int = field(default=0)
     _tick_event: threading.Event = field(default_factory=threading.Event)
@@ -74,6 +77,10 @@ class TimeManager:
     _chained_wait_count: int = 0  # 下一轮要等待的 tick 数
     _chained_wait_event: Optional[asyncio.Event] = None  # 下一轮等待的事件
     _chained_wait_started_tick: int = -1  # 链式等待启动时的 tick 计数（用于跳过当前 tick）
+    
+    # 系统暂停功能
+    _paused: bool = False  # 系统是否暂停
+    _pause_event: threading.Event = field(default_factory=threading.Event)  # 暂停控制事件
 
     def __post_init__(self) -> None:
         self._reload_config()
@@ -84,6 +91,8 @@ class TimeManager:
         self._tick_counter = 0
         self._tick_event = threading.Event()
         self._tick_waiters = []
+        # 初始化暂停控制（初始设置为运行状态）
+        self._pause_event.set()
 
     def _reload_config(self) -> None:
         """从配置加载参数"""
@@ -109,6 +118,11 @@ class TimeManager:
         self._room_lookup = repo.get_room
         self._iter_rooms = repo.list_rooms
         self._save_room = repo.save_room
+    
+    def set_scheduler(self, scheduler: "Scheduler") -> None:
+        """设置 Scheduler 引用（用于获取锁）"""
+        from application.scheduler import Scheduler
+        self._scheduler = scheduler
 
     # ================== Tick 间隔控制 ==================
     def set_tick_interval(self, seconds: float) -> None:
@@ -344,6 +358,23 @@ class TimeManager:
             if state.timer_type == TimerType.SERVICE and state.active and state.speed
         }
 
+    # ================== 系统暂停控制 ==================
+    def pause_system(self) -> None:
+        """暂停系统（阻塞 tick 循环）"""
+        self._paused = True
+        self._pause_event.clear()  # 清除事件，阻塞 tick
+        print(f"[TimeManager] System paused at tick {self._tick_counter}, tick blocked")
+    
+    def resume_system(self) -> None:
+        """恢复系统（释放 tick 阻塞，从暂停点继续）"""
+        self._paused = False
+        self._pause_event.set()  # 设置事件，释放 tick
+        print(f"[TimeManager] System resumed at tick {self._tick_counter}, tick continues")
+    
+    def is_paused(self) -> bool:
+        """检查系统是否处于暂停状态"""
+        return self._paused
+    
     # ================== 时钟推进 ==================
     def tick(self) -> None:
         """
@@ -351,25 +382,37 @@ class TimeManager:
         
         调用间隔由 _tick_interval 控制，通过调整间隔实现时间加速
         """
-        self._tick_service_timers()
-        self._tick_wait_timers()
-        self._tick_detail_timers()
-        self._tick_accommodation_timers()
-        self._tick_temperatures()
-        self._tick_throttle_windows()
-        self._check_auto_restart()
+        # 如果系统暂停，阻塞在这里直到恢复
+        self._pause_event.wait()
         
-        # 时钟沿通知
+        # 在获取锁的情况下处理内部消息（关键部分）
+        if self._scheduler:
+            self._scheduler.acquire_lock()
+        
+        try:
+            self._tick_service_timers()
+            self._tick_wait_timers()
+            self._tick_detail_timers()
+            self._tick_accommodation_timers()
+            self._tick_temperatures()
+            self._tick_throttle_windows()
+            self._check_auto_restart()
+        finally:
+            # 立即释放锁，让 HTTP 请求可以进来
+            if self._scheduler:
+                self._scheduler.release_lock()
+        
+        # 时钟沿通知（不需要锁，在锁外执行）
         self._tick_counter += 1
         self._tick_event.set()  # 唤醒同步等待的线程
         self._tick_event.clear()
         
-        # 唤醒异步等待者
+        # 唤醒异步等待者（不需要锁，在锁外执行）
         for waiter in self._tick_waiters:
             waiter.set()
         self._tick_waiters.clear()
         
-        # 执行 tick 后回调(如果有)，阻塞当前 tick 直到回调完成
+        # 执行 tick 后回调(如果有)，阻塞当前 tick 直到回调完成（不需要锁）
         if self._post_tick_callback and self._post_tick_event:
             try:
                 # 调用回调函数
@@ -380,7 +423,7 @@ class TimeManager:
                 self._post_tick_callback = None
                 self._post_tick_event = None
         
-        # 处理链式等待：如果有链式等待被注册，检查是否达到目标 tick 数
+        # 处理链式等待：如果有链式等待被注册，检查是否达到目标 tick 数（不需要锁）
         if self._chained_wait_event and self._chained_wait_count > 0:
             # 跳过启动链式等待的那个 tick，从下一个 tick 开始计数
             if self._tick_counter > self._chained_wait_started_tick:
@@ -497,6 +540,10 @@ class TimeManager:
                     room_id=room.room_id,
                     payload={"speed": room.speed or "MID"}
                 ))
+    
+    def _handle_able_to_preempt(self, event: SchedulerEvent) -> None:
+        pass
+
 
     # ================== 调试接口 ==================
     def get_timer_stats(self) -> dict:
