@@ -167,6 +167,8 @@ class Scheduler:
     async def _handle_temperature_reached(self, event: SchedulerEvent) -> None:
         """处理温度达标事件"""
         print(f"[Scheduler] Temperature reached for room {event.room_id}")
+        # 达到目标温度后进入回温阶段：标记后续偏离阈值时可自动重启送风
+        self.time_manager.mark_needs_auto_restart(event.room_id)
         self.release_service(event.room_id)
         
         # 推送状态更新给前端
@@ -243,6 +245,8 @@ class Scheduler:
             room.is_serving = True
             room.speed = service.speed
             self._save_room(room)
+        # 分配服务后清除自动重启标记
+        self.time_manager.clear_auto_restart_flag(service.room_id)
         self._start_detail_segment(service.room_id, service.speed)
 
     def release_service(self, room_id: str) -> None:
@@ -258,6 +262,15 @@ class Scheduler:
         
         if self.service_queue:
             self.service_queue.remove(room_id)
+        
+        # 确保没有遗留的等待计时器/队列，便于后续自动重启判断“不在队列”
+        wait_entry = self._get_wait_entry(room_id)
+        if wait_entry:
+            self._safe_cancel_timer(wait_entry)
+        if self.waiting_queue:
+            self.waiting_queue.remove(room_id)
+        # 双保险：即便 waiting_queue 中已无条目，也按 room_id 清理 WAIT 定时器
+        self.time_manager.cancel_wait_timer_for_room(room_id)
         
         self._close_detail_segment(room_id)
         room = self._room_lookup(room_id)
@@ -365,7 +378,7 @@ class Scheduler:
         if room:
             room.is_serving = False
             self._save_room(room)
-        
+
         print(f"[Scheduler] Moved to waiting: room={service.room_id}, time_slice_enforced={time_slice_enforced}")
 
     def _fill_capacity_if_possible(self) -> None:

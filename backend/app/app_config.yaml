@@ -9,7 +9,7 @@ temperature:
   heat_range:
   - 25
   - 30
-  default_target: 23.0
+  default_target: 25.0
   auto_restart_threshold: 1.0
   idle_drift_per_min: 0.5
   mid_delta_per_min: 0.5
@@ -28,4 +28,4 @@ throttle:
 accommodation:
   rate_per_night: 150.0
 clock:
-  ratio: 60.0
+  ratio: 10.0

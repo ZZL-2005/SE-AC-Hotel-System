@@ -48,7 +48,7 @@ HYPERPARAM_OVERRIDES: Dict[str, float] = {
     "maxConcurrent": 3,
     "timeSliceSeconds": 120,
     "changeTempMs": 1000,
-    "autoRestartThreshold": 1,
+    "autoRestartThreshold": 1.0,
     # 温控：来自需求表格（制热 18-25℃、缺省 23℃、不同风速的升温速率）
     "coolRangeMin": 18.0,
     "coolRangeMax": 28.0,
@@ -58,7 +58,7 @@ HYPERPARAM_OVERRIDES: Dict[str, float] = {
     "midDeltaPerMin": 0.5,  # 1℃/2min
     "highMultiplier": 2,  # -> 1℃/1min
     "lowMultiplier": 2/3,  # -> 1℃/3min
-    "defaultTarget": 23.0,
+    "defaultTarget": 25.0,
     # 计费：1 元/1℃，不同风速对应每分钟单价
     "pricePerUnit": 1.0,
     "rateHighUnitPerMin": 1.0,
@@ -67,18 +67,19 @@ HYPERPARAM_OVERRIDES: Dict[str, float] = {
     # 住宿默认单价（单房自定义仍通过 open_room 设置）
     "ratePerNight": 150.0,
     # 时钟倍率：ratio=60 代表 1 分钟的业务时间约等于 1 秒真实时间
-    "clockRatio": 60.0,
+    "clockRatio": 10.0,
 }
 
 # ---------------------------------------------------------------------------
 # 2) 房间初始化：来自「房间初始温度」表。可增删房间、修改初温和房价。
-ROOM_PRESETS: List[Dict[str, Any]] = [
-    {"roomId": "1", "initialTemp": 10.0, "ratePerNight": 100.0},
-    {"roomId": "2", "initialTemp": 15.0, "ratePerNight": 125.0},
-    {"roomId": "3", "initialTemp": 18.0, "ratePerNight": 150.0},
-    {"roomId": "4", "initialTemp": 12.0, "ratePerNight": 200.0},
-    {"roomId": "5", "initialTemp": 14.0, "ratePerNight": 100.0},
+ROOM_PRESETS = [
+    {"roomId": "1", "initialTemp": 32.0, "ratePerNight": 100.0},
+    {"roomId": "2", "initialTemp": 28.0, "ratePerNight": 125.0},
+    {"roomId": "3", "initialTemp": 30.0, "ratePerNight": 150.0},
+    {"roomId": "4", "initialTemp": 29.0, "ratePerNight": 200.0},
+    {"roomId": "5", "initialTemp": 35.0, "ratePerNight": 100.0},
 ]
+
 
 # ---------------------------------------------------------------------------
 # 3) 时间轴：根据 Excel 中每分钟的操作填写。以下内容由截图推断，可根据
@@ -88,71 +89,84 @@ ROOM_PRESETS: List[Dict[str, Any]] = [
 #      - power_off -> POST /rooms/{id}/ac/power-off
 #      - change_temp -> POST /rooms/{id}/ac/change-temp
 #      - change_speed -> POST /rooms/{id}/ac/change-speed
-TIMELINE: Dict[int, List[Dict[str, Any]]] = {
-    1: [
+TIMELINE = {
+    0: [
         {"roomId": "1", "type": "power_on"},
+    ],
+    1: [
+        {"roomId": "1", "type": "change_temp", "payload": {"targetTemp": 18}},
+        {"roomId": "2", "type": "power_on"},
+        {"roomId": "5", "type": "power_on"},
     ],
     2: [
-        {"roomId": "1", "type": "change_temp", "payload": {"targetTemp": 24.0}},
-        {"roomId": "2", "type": "power_on"}
-    ],
-    3: [
         {"roomId": "3", "type": "power_on"},
     ],
-    4: [
-        {"roomId": "2", "type": "change_temp", "payload": {"targetTemp": 25.0}},
+    3: [
+        {"roomId": "2", "type": "change_temp", "payload": {"targetTemp": 19}},
         {"roomId": "4", "type": "power_on"},
-        {"roomId": "5", "type": "power_on"},
+    ],
+    4: [
+        {"roomId": "5", "type": "change_temp", "payload": {"targetTemp": 22}},
     ],
     5: [
-        {"roomId":"3", "type": "change_temp", "payload": {"targetTemp": 28.0}},
-        {"roomId": "5", "type": "change_speed", "payload": {"speed": "HIGH"}},
-    ],
-    6: [
         {"roomId": "1", "type": "change_speed", "payload": {"speed": "HIGH"}},
     ],
-    8: [
-        {"roomId": "5", "type": "change_temp", "payload": {"targetTemp": 24.0}},
+    6: [
+        {"roomId": "2", "type": "power_off"},
     ],
-    10: [
-        {"roomId": "1", "type": "change_temp", "payload": {"targetTemp": 22.0}},
-        {"roomId": "4", "type": "change_temp", "payload": {"targetTemp": 21.0}},
+    7: [
+        {"roomId": "2", "type": "power_on"},
+        {"roomId": "5", "type": "change_speed", "payload": {"speed": "HIGH"}},
+    ],
+    9: [
+        {"roomId": "1", "type": "change_temp", "payload": {"targetTemp": 22}},
+        {"roomId": "4", "type": "change_temp", "payload": {"targetTemp": 18}},
         {"roomId": "4", "type": "change_speed", "payload": {"speed": "HIGH"}},
     ],
+    11: [
+        {"roomId": "2", "type": "change_temp", "payload": {"targetTemp": 22}},
+    ],
     12: [
-        {"roomId": "5", "type": "change_speed", "payload": {"speed": "MID"}},
+        {"roomId": "5", "type": "change_speed", "payload": {"speed": "LOW"}},
     ],
-    13: [
-        {"roomId": "2", "type": "change_speed", "payload": {"speed": "HIGH"}},
-    ],
-    15: [
-        {"roomId": "1", "type": "power_off", "payload": {}},
+    14: [
+        {"roomId": "1", "type": "power_off"},
+        {"roomId": "3", "type": "change_temp", "payload": {"targetTemp": 24}},
         {"roomId": "3", "type": "change_speed", "payload": {"speed": "LOW"}},
     ],
+    15: [
+        {"roomId": "5", "type": "change_temp", "payload": {"targetTemp": 20}},
+        {"roomId": "5", "type": "change_speed", "payload": {"speed": "HIGH"}},
+    ],
+    16: [
+        {"roomId": "2", "type": "power_off"},
+    ],
     17: [
-        {"roomId": "5", "type": "power_off", "payload": {}},
+        {"roomId": "3", "type": "change_speed", "payload": {"speed": "HIGH"}},
     ],
     18: [
-         {"roomId": "3", "type": "change_speed", "payload": {"speed": "HIGH"}},
-    ],
-    19: [
         {"roomId": "1", "type": "power_on"},
-        {"roomId": "4", "type": "change_temp", "payload": {"targetTemp": 25.0}},
+        {"roomId": "4", "type": "change_temp", "payload": {"targetTemp": 20}},
         {"roomId": "4", "type": "change_speed", "payload": {"speed": "MID"}},
     ],
-    21: [
-        {"roomId": "2", "type": "change_temp", "payload": {"targetTemp": 26.0}},
-        {"roomId": "2", "type": "change_speed", "payload": {"speed": "MID"}},
-        {"roomId": "5", "type": "power_on"},
+    19: [
+        {"roomId": "2", "type": "power_on"},
+    ],
+    20: [
+        {"roomId": "5", "type": "change_temp", "payload": {"targetTemp": 25}},
+    ],
+    22: [
+        {"roomId": "3", "type": "power_off"},
+    ],
+    23: [
+        {"roomId": "5", "type": "power_off"},
+    ],
+    24: [
+        {"roomId": "1", "type": "power_off"},
     ],
     25: [
-        {"roomId": "1", "type": "power_off", "payload": {}},
-        {"roomId": "3", "type": "power_off", "payload": {}},
-        {"roomId": "5", "type": "power_off", "payload": {}},
-    ],
-    26: [
-        {"roomId": "2", "type": "power_off", "payload": {}},
-        {"roomId": "4", "type": "power_off", "payload": {}},
+        {"roomId": "2", "type": "power_off"},
+        {"roomId": "4", "type": "power_off"},
     ],
 }
 
@@ -230,7 +244,7 @@ def main() -> None:
     
     open_rooms(ROOM_PRESETS)
     check_in_rooms(ROOM_PRESETS)
-    simulate_timeline_minute_start(clock_ratio, max_minutes=args.max_minutes, step_by_step=args.step_by_step)
+    simulate_timeline_minute_start(clock_ratio, max_minutes=args.max_minutes)
 
 
 def parse_args() -> argparse.Namespace:
@@ -239,7 +253,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dry-run", action="store_true", help="Print requests without sending")
     parser.add_argument("--base-url", type=str, default=None, help="Override backend base URL (e.g. http://localhost:8000)")
     parser.add_argument("--max-minutes", type=int, default=None, help="Limit replay to N minutes")
-    parser.add_argument("--step-by-step", action="store_true", help="Enable step-by-step debugging mode (pause system after each minute)")
     return parser.parse_args()
 
 
@@ -257,7 +270,7 @@ def fetch_hyperparams() -> Dict[str, Any]:
             "maxConcurrent": 3,
             "timeSliceSeconds": 60,
             "changeTempMs": 1000,
-            "autoRestartThreshold": 0.5,
+            "autoRestartThreshold": 1.0,
             "idleDriftPerMin": 0.3,
             "midDeltaPerMin": 0.5,
             "highMultiplier": 1.2,
@@ -499,25 +512,28 @@ def send_action(action: Dict[str, Any]) -> None:
         CONSOLE.print(error_panel)
 
 
-def wait_for_tick_and_snapshot(minute: int, count: int = 1, timeout: float = 5.0, chain_next: bool = False, next_count: int = 60) -> bool:
+def wait_for_tick_and_snapshot(minute: int, count: int = 1, timeout: float = 5.0) -> bool:
     """
+<<<<<<< HEAD
+    等待指定数量的 tick 完成并立即采集快照(原子操作)。
+
+=======
     等待指定数量的 tick 完成并在 tick 线程中立即采集快照(阻塞 tick)
     
     通过在 tick 线程中同步执行快照采集,确保快照时间戳与 tick 推进完全一致,
     完全消除了异步等待和快照采集之间可能产生的额外 tick 导致的时间偏移。
     
+>>>>>>> 2e46a1e9030c96dfa8be2834efd492908b15f231
     参数:
     - minute: 当前分钟数(用于显示)
     - count: 要等待的 tick 数量
     - timeout: 总超时时间(秒)
-    - chain_next: 是否在快照采集后立即启动下一轮等待(默认 False)
-    - next_count: 下一轮要等待的 tick 数量(默认 60)
 
     返回 True 表示成功，False 表示超时。
     """
     if DRY_RUN:
         CONSOLE.print(Panel.fit(
-            f"[DRY] POST {BASE_URL}/monitor/wait-tick-and-snapshot\ncount={count}, timeout={timeout:.1f}s, chain_next={chain_next}",
+            f"[DRY] POST {BASE_URL}/monitor/wait-tick-and-snapshot\ncount={count}, timeout={timeout:.1f}s",
             title="Dry Run",
             border_style="magenta"
         ))
@@ -526,20 +542,12 @@ def wait_for_tick_and_snapshot(minute: int, count: int = 1, timeout: float = 5.0
     try:
         url = f"{BASE_URL}/monitor/wait-tick-and-snapshot"
         params = {"count": count, "timeout": timeout}
-        
-        # 如果启用链式等待，添加参数
-        if chain_next:
-            params["chain_next"] = True
-            params["next_count"] = next_count
 
         # 使用 Rich Table 显示调用信息
         t = Table(title="🕑 Waiting for Tick + Snapshot (Blocking)", box=box.SIMPLE, show_header=False)
         t.add_row("URL", f"{url}")
         t.add_row("count", str(count))
         t.add_row("timeout", f"{timeout:.1f}s")
-        if chain_next:
-            t.add_row("chain_next", "[green]True[/]")
-            t.add_row("next_count", str(next_count))
         t.add_row("mechanism", "[cyan]Snapshot in tick thread (blocks next tick)[/]")
         CONSOLE.print(t)
 
@@ -551,7 +559,6 @@ def wait_for_tick_and_snapshot(minute: int, count: int = 1, timeout: float = 5.0
         tick_counter = result.get("tickCounter", 0)
         message = result.get("message", "")
         snapshot = result.get("snapshot")
-        next_wait_started = result.get("nextWaitStarted", False)
 
         # 显示结果
         result_table = Table(
@@ -564,8 +571,6 @@ def wait_for_tick_and_snapshot(minute: int, count: int = 1, timeout: float = 5.0
         result_table.add_row("message", message)
         if success:
             result_table.add_row("mechanism", "[green]✓ Snapshot captured in tick thread[/]")
-        if next_wait_started:
-            result_table.add_row("nextWait", f"[green]✓ Chained wait started (count={next_count})[/]")
         CONSOLE.print(result_table)
 
         # 处理快照数据
@@ -753,24 +758,15 @@ def export_excel_snapshots(rows: List[Dict[str, Any]], filename: str = "snapshot
     for m in minutes_full:
         ws.cell(row=current_row, column=1, value=m)
         col = 2
-        # 构建本分钟的队列字符串：房间ID/时间（秒），仅展示在一行的"服务队列/等待队列"列
-        # 修正：每个房间在每分钟只应该出现一次，分别在服务队列或等待队列中
+        # 构建本分钟的队列字符串：房间ID/时间（秒），仅展示在一行的“服务队列/等待队列”列
         minute_rows = [r for r in rows if r["minute"] == m]
         serving_pairs = []
         waiting_pairs = []
-        room_ids_processed = set()
         for r in minute_rows:
-            room_id = r['roomId']
-            # 避免重复处理同一个房间
-            if room_id in room_ids_processed:
-                continue
-            room_ids_processed.add(room_id)
-            
-            # 根据房间的当前状态将其添加到相应的队列中
             if r.get("isServing"):
-                serving_pairs.append(f"R{room_id}/{int(r.get('servedSeconds', 0))}")
-            elif r.get("isWaiting"):
-                waiting_pairs.append(f"R{room_id}/{int(r.get('waitedSeconds', 0))}")
+                serving_pairs.append(f"R{r['roomId']}/{int(r.get('servedSeconds', 0))}")
+            if r.get("isWaiting"):
+                waiting_pairs.append(f"R{r['roomId']}/{int(r.get('waitedSeconds', 0))}")
         service_str = " ".join(sorted(serving_pairs)) if serving_pairs else ""
         wait_str = " ".join(sorted(waiting_pairs)) if waiting_pairs else ""
 
@@ -781,7 +777,23 @@ def export_excel_snapshots(rows: List[Dict[str, Any]], filename: str = "snapshot
                 ws.cell(row=current_row, column=col + 1, value=round(r["targetTemp"], 1))
                 ws.cell(row=current_row, column=col + 2, value=r["speed"])
                 # 费用列使用累计费用（totalFee）
-                ws.cell(row=current_row, column=col + 3, value=round(r["totalFee"], 2))
+                # --- 新增：取房间住宿费配置 ---
+                room_rate = None
+                for preset in ROOM_PRESETS:
+                    if str(preset["roomId"]) == room:
+                        room_rate = float(preset.get("ratePerNight", 0.0))
+                        break
+                if room_rate is None:
+                    room_rate = 0.0
+
+                # --- 判断关机状态，加一天房费 ---
+                status = (r["status"] or "").upper()
+                add_room_fee = status in ("OFF", "IDLE", "POWER_OFF")
+
+                display_fee = r["totalFee"] + (room_rate if add_room_fee else 0.0)
+
+                ws.cell(row=current_row, column=col + 3, value=round(display_fee, 2))
+
                 for c in range(col, col + 4):
                     ws.cell(row=current_row, column=c).alignment = Alignment(horizontal="center")
                 last_by_room[room] = r
@@ -823,88 +835,20 @@ def export_excel_snapshots(rows: List[Dict[str, Any]], filename: str = "snapshot
         CONSOLE.print(f"[red]Failed to write Excel: {exc}[/]")
 
 
-def pause_system() -> bool:
-    """暂停系统（调试功能）"""
-    if DRY_RUN:
-        CONSOLE.print(Panel.fit(
-            f"[DRY] POST {BASE_URL}/debug/system/pause",
-            title="Dry Run",
-            border_style="magenta"
-        ))
-        return True
-    
-    try:
-        resp = SESSION.post(f"{BASE_URL}/debug/system/pause", timeout=5)
-        resp.raise_for_status()
-        result = resp.json()
-        CONSOLE.print(Panel(
-            f"[yellow]⏸️  系统已暂停[/]\n"
-            f"Tick: {result.get('tick', 'N/A')}\n"
-            f"{result.get('message', '')}",
-            title="🛑 System Paused",
-            border_style="yellow"
-        ))
-        return True
-    except requests.RequestException as exc:
-        CONSOLE.print(Panel(
-            f"[red]⚠ 暂停系统失败:[/]\n{exc}",
-            title="Error",
-            border_style="red"
-        ))
-        return False
-
-
-def resume_system() -> bool:
-    """恢复系统（调试功能）"""
-    if DRY_RUN:
-        CONSOLE.print(Panel.fit(
-            f"[DRY] POST {BASE_URL}/debug/system/resume",
-            title="Dry Run",
-            border_style="magenta"
-        ))
-        return True
-    
-    try:
-        resp = SESSION.post(f"{BASE_URL}/debug/system/resume", timeout=5)
-        resp.raise_for_status()
-        result = resp.json()
-        CONSOLE.print(Panel(
-            f"[green]▶️  系统已恢复[/]\n"
-            f"Tick: {result.get('tick', 'N/A')}\n"
-            f"{result.get('message', '')}",
-            title="✅ System Resumed",
-            border_style="green"
-        ))
-        return True
-    except requests.RequestException as exc:
-        CONSOLE.print(Panel(
-            f"[red]⚠ 恢复系统失败:[/]\n{exc}",
-            title="Error",
-            border_style="red"
-        ))
-        return False
-
-
-def simulate_timeline_minute_start(clock_ratio: float, max_minutes: Optional[int] = None, step_by_step: bool = False) -> None:
+def simulate_timeline_minute_start(clock_ratio: float, max_minutes: Optional[int] = None) -> None:
     """Replay timeline with snapshots taken at the *start* of each minute.
 
     Row m in Excel represents the state at the beginning of minute m
     (after the previous minute's 60 ticks have completed, before actions of minute m).
-    
-    启用链式等待机制，避免在每次 HTTP 请求之间漏过 tick。
     """
     minute_step = 60.0 / max(clock_ratio, 0.01)
     max_minute = max(TIMELINE.keys(), default=0)
     if max_minutes is not None:
         max_minute = min(max_minute, max_minutes)
 
-    # 当前时钟倍率（单步调试模式下可动态调整）
-    current_clock_ratio = clock_ratio
-    
     CONSOLE.print(Panel.fit(
-        f"minutes={max_minute}\nclockRatio={clock_ratio}\nminute_step={minute_step:.2f}s\nDRY_RUN={DRY_RUN}\nSTEP_BY_STEP={step_by_step}\n"
-        f"Chain Wait: [green]Enabled[/] (防止漏 tick)",
-        title="Starting Timeline (minute-start + chain)",
+        f"minutes={max_minute}\nclockRatio={clock_ratio}\nminute_step={minute_step:.2f}s\nDRY_RUN={DRY_RUN}",
+        title="Starting Timeline (minute-start)",
         border_style="cyan"
     ))
 
@@ -916,11 +860,17 @@ def simulate_timeline_minute_start(clock_ratio: float, max_minutes: Optional[int
 
     # Baseline: minute 0 start (rooms opened + checked-in, before any timeline actions)
     snapshot_rooms(0)
+    # Execute minute-0 actions immediately (no need to wait for ticks of a previous minute)
+    actions0 = TIMELINE.get(0, [])
+    if actions0:
+        CONSOLE.print(Panel.fit("Minute 0", border_style="blue"))
+        for action in actions0:
+            send_action(action)
 
     for minute in range(1, max_minute + 1):
         if not DRY_RUN:
             # Advance one business minute (60 ticks) and capture snapshot at the *start* of this minute.
-            tick_interval = 60.0 / max(current_clock_ratio, 0.01) / 60
+            tick_interval = 60.0 / max(clock_ratio, 0.01) / 60
             expected_time = 60 * tick_interval
             timeout = max(30.0, expected_time * 20)
 
@@ -928,25 +878,15 @@ def simulate_timeline_minute_start(clock_ratio: float, max_minutes: Optional[int
                 f"[cyan]分钟 {minute}: 等待上一分钟的 60 tick 完成并采集快照[/]\n"
                 f"预计耗时: [yellow]{expected_time:.2f}[/] 秒\n"
                 f"超时设置: [yellow]{timeout:.1f}[/] 秒\n"
-                f"链式等待: [green]启用[/] (防止漏 tick)\n"
                 f"DRY_RUN: [red]{DRY_RUN}[/]",
-                title="⏱️ Time Sync (to minute start) + Chain Next",
+                title="⏱️ Time Sync (to minute start)",
                 border_style="cyan"
             )
             CONSOLE.print(info_panel)
 
-            # 启用链式等待：在快照采集后立即启动下一轮 60 tick 等待
-            # 这样可以确保在响应返回和下一次调用之间不会漏过任何 tick
-            chain_next = (minute < max_minute)  # 最后一分钟不需要链式等待
-            if not wait_for_tick_and_snapshot(
-                minute=minute, 
-                count=60, 
-                timeout=timeout, 
-                chain_next=chain_next, 
-                next_count=60
-            ):
+            if not wait_for_tick_and_snapshot(minute=minute, count=60, timeout=timeout):
                 CONSOLE.print(Panel(
-                    "[red]⚠ 时钟同步超时，使用 sleep + snapshot 备用方案[/]",
+                    "[red]�?时钟同步超时，使用 sleep + snapshot 备用方案[/]",
                     border_style="red"
                 ))
                 time.sleep(minute_step)
@@ -965,76 +905,6 @@ def simulate_timeline_minute_start(clock_ratio: float, max_minutes: Optional[int
                 send_action(action)
         else:
             CONSOLE.print(f"[dim]Minute {minute}: No actions[/]")
-            
-        # 可选：在每分钟操作后抓一份监控视图，方便对照 Excel。
-        if not DRY_RUN:
-            snapshot_rooms(minute)
-            
-        # 单步调试模式：每分钟后暂停系统，等待用户确认
-        if step_by_step and not DRY_RUN:
-            pause_system()
-            
-            # 显示当前状态和可用命令
-            CONSOLE.print(Panel(
-                f"[cyan]📍 已完成分钟 {minute}[/]\n"
-                f"[yellow]系统已暂停，可以查看调试管理员界面检查状态[/]\n\n"
-                f"[bold]当前时钟倍率:[/] [green]{current_clock_ratio}x[/] (1分钟 ≈ {60.0/max(current_clock_ratio, 0.01):.2f}秒)\n\n"
-                f"[bold]可用命令:[/]\n"
-                f"  [green]Enter[/]          - 继续下一分钟\n"
-                f"  [cyan]speed <ratio>[/]  - 调整时钟倍率 (例如: speed 120)\n"
-                f"  [magenta]info[/]           - 显示当前配置\n"
-                f"  [red]q[/]              - 退出测试",
-                title="⏸️  Step-by-Step Debug Mode",
-                border_style="cyan"
-            ))
-            
-            while True:
-                user_input = input("> ").strip()
-                
-                if user_input.lower() == 'q':
-                    CONSOLE.print("[yellow]用户中止测试[/]")
-                    return
-                elif user_input.lower() == 'info':
-                    # 显示当前配置信息
-                    info_table = Table(title="当前配置", box=box.SIMPLE, show_header=False)
-                    info_table.add_row("当前分钟", str(minute))
-                    info_table.add_row("总分钟数", str(max_minute))
-                    info_table.add_row("时钟倍率", f"{current_clock_ratio}x")
-                    info_table.add_row("1分钟耗时", f"{60.0/max(current_clock_ratio, 0.01):.2f}秒")
-                    info_table.add_row("Tick间隔", f"{1.0/current_clock_ratio:.4f}秒")
-                    CONSOLE.print(info_table)
-                elif user_input.lower().startswith('speed '):
-                    # 调整时钟倍率
-                    try:
-                        parts = user_input.split()
-                        new_ratio = float(parts[1])
-                        if new_ratio <= 0:
-                            CONSOLE.print("[red]❌ 时钟倍率必须大于 0[/]")
-                            continue
-                        if new_ratio > 1000:
-                            CONSOLE.print("[yellow]⚠ 时钟倍率过高可能导致系统不稳定，建议使用 <= 1000[/]")
-                        
-                        # 更新时钟倍率
-                        current_clock_ratio = new_ratio
-                        configure_tick_interval(current_clock_ratio)
-                        
-                        CONSOLE.print(Panel(
-                            f"[green]✅ 时钟倍率已调整为 {current_clock_ratio}x[/]\n"
-                            f"1分钟业务时间 ≈ {60.0/max(current_clock_ratio, 0.01):.2f}秒真实时间\n"
-                            f"Tick间隔: {1.0/current_clock_ratio:.4f}秒",
-                            title="⚡ Speed Updated",
-                            border_style="green"
-                        ))
-                    except (ValueError, IndexError):
-                        CONSOLE.print("[red]❌ 无效的命令格式。使用: speed <数字>[/]")
-                elif user_input == '':
-                    # 按 Enter 继续
-                    break
-                else:
-                    CONSOLE.print("[yellow]⚠ 未知命令。可用命令: Enter, speed <ratio>, info, q[/]")
-            
-            # 恢复系统继续
-            resume_system()
 
     # Export Excel using minute-start semantics
     CONSOLE.print("[green]✅ Timeline replay finished (minute-start)[/]")

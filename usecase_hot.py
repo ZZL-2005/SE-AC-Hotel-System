@@ -48,7 +48,7 @@ HYPERPARAM_OVERRIDES: Dict[str, float] = {
     "maxConcurrent": 3,
     "timeSliceSeconds": 120,
     "changeTempMs": 1000,
-    "autoRestartThreshold": 1.0,
+    "autoRestartThreshold": 0.5,
     # 温控：来自需求表格（制热 18-25℃、缺省 23℃、不同风速的升温速率）
     "coolRangeMin": 18.0,
     "coolRangeMax": 28.0,
@@ -100,7 +100,7 @@ TIMELINE: Dict[int, List[Dict[str, Any]]] = {
         {"roomId": "3", "type": "power_on"},
     ],
     4: [
-        {"roomId": "3", "type": "change_temp", "payload": {"targetTemp": 25.0}},
+        {"roomId": "2", "type": "change_temp", "payload": {"targetTemp": 25.0}},
         {"roomId": "4", "type": "power_on"},
         {"roomId": "5", "type": "power_on"},
     ],
@@ -257,7 +257,7 @@ def fetch_hyperparams() -> Dict[str, Any]:
             "maxConcurrent": 3,
             "timeSliceSeconds": 60,
             "changeTempMs": 1000,
-            "autoRestartThreshold": 1.0,
+            "autoRestartThreshold": 0.5,
             "idleDriftPerMin": 0.3,
             "midDeltaPerMin": 0.5,
             "highMultiplier": 1.2,

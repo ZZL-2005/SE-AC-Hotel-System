@@ -27,6 +27,8 @@ class Room:
     active_service_id: Optional[str] = None
     last_temp_change_timestamp: Optional[datetime] = None
     pending_target_temp: Optional[float] = None
+    # 内存态标记：释放/等待后是否需要自动重启送风
+    needs_auto_restart_check: bool = False
     # 空调是否被用户开启（用于控制自动重启）
     powered_on: bool = False
     manual_powered_off: bool = False
@@ -140,4 +142,3 @@ class Room:
         step = delta_per_sec if difference > 0 else -delta_per_sec
         self.current_temp += step
         return False
-

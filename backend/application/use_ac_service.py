@@ -97,7 +97,12 @@ class UseACService:
         speed: Optional[str] = None,
     ) -> None:
         room = self._ensure_room(room_id)
-        room.mark_occupied(initial_temp=room.current_temp)
+        # 保留入住时的初始温度，开机只更新占用状态
+        room.mark_occupied()
+
+        # 开机后清除自动重启标记
+        if self.scheduler:
+            self.scheduler.time_manager.clear_auto_restart_flag(room_id)
 
         temp_cfg = self.config.temperature or {}
         
@@ -152,4 +157,6 @@ class UseACService:
         scheduler = self._ensure_scheduler()
         self.billing_service.close_current_detail_record(room_id, datetime.utcnow())
         self.repo.save_room(room)
+        # 关机后清除自动重启标记
+        scheduler.time_manager.clear_auto_restart_flag(room_id)
         scheduler.cancel_request(room_id)

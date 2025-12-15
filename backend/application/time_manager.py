@@ -82,6 +82,9 @@ class TimeManager:
     _paused: bool = False  # 系统是否暂停
     _pause_event: threading.Event = field(default_factory=threading.Event)  # 暂停控制事件
 
+    # 内存态：需要自动重启检查的房间ID集合
+    _needs_auto_restart: Set[str] = field(default_factory=set)
+
     def __post_init__(self) -> None:
         self._reload_config()
         # 初始化房间到计时器的映射
@@ -93,6 +96,9 @@ class TimeManager:
         self._tick_waiters = []
         # 初始化暂停控制（初始设置为运行状态）
         self._pause_event.set()
+        # 初始化自动重启标记集合
+        if not self._needs_auto_restart:
+            self._needs_auto_restart = set()
 
     def _reload_config(self) -> None:
         """从配置加载参数"""
@@ -308,11 +314,33 @@ class TimeManager:
         """获取计时器完整状态（内部使用）"""
         return self._timers.get(timer_id)
 
+    def cancel_wait_timer_for_room(self, room_id: str) -> None:
+        """
+        取消某个房间的 WAIT 计时器（若存在）。
+        用于释放服务后，防止遗留 WAIT 定时器导致误判“仍在队列”。
+        """
+        timer_id = self._room_to_timer.get(room_id, {}).get(TimerType.WAIT)
+        if not timer_id:
+            return
+        self._timers.pop(timer_id, None)
+        # 清理映射
+        if room_id in self._room_to_timer:
+            self._room_to_timer[room_id].pop(TimerType.WAIT, None)
+
     def cancel_timer(self, timer_id: str) -> None:
         """取消计时器"""
         state = self._timers.pop(timer_id, None)
         if state:
             self._remove_room_timer(state.room_id, state.timer_type)
+
+    # ================== 自动重启标记控制 ==================
+    def mark_needs_auto_restart(self, room_id: str) -> None:
+        """标记房间需要自动重启检查（内存态，不持久化）"""
+        self._needs_auto_restart.add(room_id)
+
+    def clear_auto_restart_flag(self, room_id: str) -> None:
+        """清除房间的自动重启标记"""
+        self._needs_auto_restart.discard(room_id)
 
     # ================== 内部辅助方法 ==================
     def _set_room_timer(self, room_id: str, timer_type: TimerType, timer_id: str) -> None:
@@ -525,16 +553,22 @@ class TimeManager:
         from domain.room import RoomStatus
         
         active_rooms = self._get_active_service_rooms()
-        waiting_rooms = self._get_active_wait_rooms()
-        
+
         for room in self._iter_rooms():
             if room.status == RoomStatus.VACANT:
                 continue
             if getattr(room, "manual_powered_off", False):
                 continue
-            if room.room_id in active_rooms or room.room_id in waiting_rooms:
+            # 仍在服务中则略过，等待业务流释放
+            if room.room_id in active_rooms:
                 continue
-            if room.needs_auto_restart(self.auto_restart_threshold):
+            # 仅对显式标记的房间进行自动重启判断
+            if room.room_id not in self._needs_auto_restart:
+                continue
+
+            if abs(room.current_temp - room.target_temp) >= self.auto_restart_threshold:
+                # 触发自动重启后立即清标记，防止重复触发
+                self.clear_auto_restart_flag(room.room_id)
                 self.event_bus.publish_sync(SchedulerEvent(
                     event_type=EventType.AUTO_RESTART_NEEDED,
                     room_id=room.room_id,
@@ -716,4 +750,3 @@ class TimeManager:
             self._chained_wait_count = 0
             self._chained_wait_event = None
             self._chained_wait_started_tick = -1
-
