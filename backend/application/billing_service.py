@@ -110,6 +110,15 @@ class BillingService:
         completed = list(self.repository.list_completed_detail_records(room_id))
         if not completed:
             return None
+
+        # 只汇总本次入住后的详单，避免多次入住累加历史记录导致账单/详单不一致
+        order = self.repository.get_latest_accommodation_order(room_id)
+        check_in_at = order.get("check_in_at") if order else None
+        if check_in_at:
+            completed = [rec for rec in completed if rec.started_at >= check_in_at]
+            if not completed:
+                return None
+
         period_start = min(rec.started_at for rec in completed)
         period_end = max(rec.ended_at for rec in completed if rec.ended_at)
         bill = ACBill(
@@ -118,7 +127,7 @@ class BillingService:
             period_start=period_start,
             period_end=period_end,
             total_fee=0.0,
-            details=list(completed),
+            details=[],
         )
         for rec in completed:
             bill.add_record(rec)
