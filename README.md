@@ -26,6 +26,7 @@ pip install -r requirements.txt
 
 # 启动服务
 uvicorn app.main:app --reload
+uvicorn app.main:socket_app --reload
 ```
 *后端运行在 `http://localhost:8000`*
 

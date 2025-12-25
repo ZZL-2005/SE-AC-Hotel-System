@@ -4,18 +4,45 @@ import { monitorClient } from "../api/monitorClient";
 import type { RoomStatus } from "../types/rooms";
 
 type TabType = "checkin" | "checkout";
-type FilterType = "all" | "available" | "occupied";
+type FilterType = "all" | "available" | "occupied" | "reserved";
+
+const defaultReservationEta = (() => {
+  const d = new Date();
+  d.setHours(d.getHours() + 2);
+  return d.toISOString().slice(0, 16);
+})();
+
+type Reservation = {
+  roomId: string;
+  guestName: string;
+  contact: string;
+  eta: string;
+  note?: string;
+  createdAt: string;
+};
 
 // SSD 入住流程步骤
 type CheckinStep = 1 | 2 | 3 | 4 | 5;
 
 export function FrontDeskPage() {
   const [activeTab, setActiveTab] = useState<TabType>("checkin");
-  const [roomFilter, setRoomFilter] = useState<FilterType>("all");
+const [roomFilter, setRoomFilter] = useState<FilterType>("all");
 
-  // ========== SSD 分步入住状态 ==========
-  // 当前步骤：1-登记顾客 → 2-查询房态 → 3-创建订单 → 4-押金(可选) → 5-门卡(可选)
-  const [checkinStep, setCheckinStep] = useState<CheckinStep>(1);
+// ========== SSD 分步入住状态 ==========
+// 当前步骤：1-登记顾客 → 2-查询房态 → 3-创建订单 → 4-押金(可选) → 5-门卡(可选)
+const [checkinStep, setCheckinStep] = useState<CheckinStep>(1);
+
+// 预定匹配辅助
+const normalizeText = (val: string) => val?.trim().toLowerCase() ?? "";
+const matchReservationWithCustomer = (reservation?: Reservation | null, name?: string, contact?: string) => {
+  if (!reservation) return false;
+  const nameOk = reservation.guestName ? normalizeText(reservation.guestName) === normalizeText(name ?? "") : false;
+  const contactOk =
+    !reservation.contact?.trim() ||
+    reservation.contact.trim() === (contact ?? "") ||
+    normalizeText(reservation.contact) === normalizeText(name ?? "");
+  return nameOk && contactOk;
+};
   
   // Step 1: Registe_CustomerInfo(Cust_Id, Cust_name, number, date)
   const [customerInfo, setCustomerInfo] = useState({
@@ -40,6 +67,30 @@ export function FrontDeskPage() {
   
   // Step 5: Create_DoorCard(RoomId, date) - 可选
   const [doorCardCreated, setDoorCardCreated] = useState(false);
+
+  // 预定：持久化在 localStorage，避免重复分配
+  const [reservations, setReservations] = useState<Reservation[]>(() => {
+    if (typeof window === "undefined") return [];
+    const cached = window.localStorage.getItem("frontdesk-reservations");
+    if (!cached) return [];
+    try {
+      const parsed = JSON.parse(cached);
+      if (Array.isArray(parsed)) {
+        return parsed.filter((item) => item?.roomId && item?.guestName && item?.eta);
+      }
+    } catch (err) {
+      console.warn("Failed to parse cached reservations", err);
+    }
+    return [];
+  });
+  const [reservationForm, setReservationForm] = useState({
+    roomId: "",
+    guestName: "",
+    contact: "",
+    eta: defaultReservationEta,
+    note: "",
+  });
+  const [reservationMessage, setReservationMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
   
   // 消息状态
   const [checkinMessage, setCheckinMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
@@ -50,7 +101,6 @@ export function FrontDeskPage() {
   const [checkoutStep, setCheckoutStep] = useState<CheckoutStep>(1);
   const [checkoutRoomId, setCheckoutRoomId] = useState("");
   const [checkoutSummary, setCheckoutSummary] = useState<CheckOutResponse | null>(null);
-  const [checkoutError, setCheckoutError] = useState<string | null>(null);
   const [checkoutLoading, setCheckoutLoading] = useState(false);
   const [paymentLoading, setPaymentLoading] = useState(false);
   const [paymentSuccess, setPaymentSuccess] = useState(false);
@@ -58,20 +108,6 @@ export function FrontDeskPage() {
 
   // ========== 共享状态 ==========
   const [roomStatuses, setRoomStatuses] = useState<RoomStatus[]>([]);
-
-  // 入住时：只有查询房态后才显示；退房时：始终显示
-  const displayOccupiedSet = useMemo(() => {
-    // 入住流程中，未完成 Check_RoomState 前不显示房态
-    if (activeTab === "checkin" && !roomStateChecked) {
-      return new Set<string>();
-    }
-    const set = new Set<string>();
-    for (const r of roomStatuses) {
-      const st = String(r.status || "").toLowerCase();
-      if (st === "serving" || st === "waiting" || st === "occupied") set.add(String(r.roomId));
-    }
-    return set;
-  }, [roomStatuses, activeTab, roomStateChecked]);
 
   // 内部使用的真实房态（用于退房等）
   const occupiedSet = useMemo(() => {
@@ -82,6 +118,27 @@ export function FrontDeskPage() {
     }
     return set;
   }, [roomStatuses]);
+
+  // 入住时：只有查询房态后才显示；退房时：始终显示
+  const displayOccupiedSet = useMemo(() => {
+    if (activeTab === "checkin" && !roomStateChecked) {
+      return new Set<string>();
+    }
+    return occupiedSet;
+  }, [occupiedSet, activeTab, roomStateChecked]);
+
+  const reservedSet = useMemo(() => new Set(reservations.map((r) => String(r.roomId))), [reservations]);
+  const unavailableSet = useMemo(() => {
+    const set = new Set<string>(reservedSet);
+    displayOccupiedSet.forEach((id) => set.add(id));
+    return set;
+  }, [reservedSet, displayOccupiedSet]);
+
+  // 缓存预定信息，避免刷新后丢失
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem("frontdesk-reservations", JSON.stringify(reservations));
+  }, [reservations]);
 
   const loadStatuses = () => {
     monitorClient.fetchRooms().then(({ data }) => {
@@ -96,29 +153,19 @@ export function FrontDeskPage() {
     }
   }, [activeTab]);
 
-  // 切换 Tab 时重置状态
-  useEffect(() => {
-    if (activeTab === "checkin") {
-      resetCheckinFlow();
-    } else {
-      resetCheckoutFlow();
-    }
-  }, [activeTab]);
-
   // 重置退房流程
-  const resetCheckoutFlow = () => {
+  function resetCheckoutFlow() {
     setCheckoutStep(1);
     setCheckoutRoomId("");
     setCheckoutSummary(null);
-    setCheckoutError(null);
     setCheckoutLoading(false);
     setPaymentLoading(false);
     setPaymentSuccess(false);
     setCheckoutMessage(null);
-  };
+  }
 
   // 重置入住流程
-  const resetCheckinFlow = () => {
+  function resetCheckinFlow() {
     setCheckinStep(1);
     setCustomerInfo({ custId: "", custName: "", guestCount: 1, checkInDate: new Date().toISOString().slice(0, 16) });
     setCustomerRegistered(false);
@@ -130,6 +177,14 @@ export function FrontDeskPage() {
     setDepositConfirmed(false);
     setDoorCardCreated(false);
     setCheckinMessage(null);
+    setReservationMessage(null);
+  }
+
+  const handleTabChange = (nextTab: TabType) => {
+    if (nextTab === activeTab) return;
+    if (nextTab === "checkin") resetCheckinFlow();
+    else resetCheckoutFlow();
+    setActiveTab(nextTab);
   };
 
   // ========== SSD 系统事件处理 ==========
@@ -169,6 +224,59 @@ export function FrontDeskPage() {
     setCheckinMessage({ type: "success", text: "房态查询完成，请选择房间" });
   };
 
+  // 预定房间（不办理入住）
+  const handleReserveRoom = () => {
+    setReservationMessage(null);
+
+    if (!reservationForm.roomId.trim()) {
+      setReservationMessage({ type: "error", text: "请输入要预定的房间号" });
+      return;
+    }
+    if (activeTab === "checkin" && !roomStateChecked) {
+      setReservationMessage({ type: "error", text: "请先完成房态查询，再进行预定" });
+      return;
+    }
+
+    const roomId = reservationForm.roomId.trim();
+    const existingReservation = reservations.find((r) => r.roomId === roomId);
+    if (reservedSet.has(roomId)) {
+      setReservationMessage({ type: "error", text: `房间 ${roomId} 已被预定，提交后会覆盖原预定人信息` });
+    }
+    if (occupiedSet.has(roomId)) {
+      setReservationMessage({ type: "error", text: `房间 ${roomId} 已在使用中，无法预定` });
+      return;
+    }
+
+    const record: Reservation = {
+      roomId,
+      guestName: reservationForm.guestName.trim() || "未留名",
+      contact: reservationForm.contact.trim(),
+      eta: reservationForm.eta,
+      note: reservationForm.note.trim(),
+      createdAt: new Date().toISOString(),
+    };
+
+    setReservations((prev) => [...prev.filter((r) => r.roomId !== roomId), record]);
+    setReservationMessage({
+      type: "success",
+      text: `房间 ${roomId} 已为 ${record.guestName} 预留${existingReservation ? "（已覆盖旧预定）" : ""}`,
+    });
+  };
+
+  const handleCancelReservation = (roomId: string) => {
+    setReservations((prev) => prev.filter((r) => r.roomId !== roomId));
+    setReservationMessage({ type: "success", text: `已释放房间 ${roomId} 的预定` });
+  };
+
+  const fillReservationRoom = () => {
+    if (!selectedRoomId) {
+      setReservationMessage({ type: "error", text: "请先在右侧选中一个房间" });
+      return;
+    }
+    setReservationForm((prev) => ({ ...prev, roomId: selectedRoomId }));
+    setReservationMessage(null);
+  };
+
   // 选择房间（为 Step 3 准备）
   const handleSelectRoom = (id: string) => {
     if (activeTab === "checkin") {
@@ -176,8 +284,18 @@ export function FrontDeskPage() {
         setCheckinMessage({ type: "error", text: "请先查询房态" });
         return;
       }
+      const reservation = reservations.find((r) => r.roomId === id);
+      const reservationMatched = matchReservationWithCustomer(reservation, customerInfo.custName, customerInfo.custId);
+      if (reservedSet.has(id) && !reservationMatched) {
+        setCheckinMessage({ type: "error", text: "该房间已被预定，需与预定姓名/联系方式匹配后才能办理" });
+        return;
+      }
       setSelectedRoomId(id);
-      setCheckinMessage(null);
+      setCheckinMessage(
+        reservation && reservationMatched
+          ? { type: "success", text: `与预定信息匹配，可继续办理入住（房间 ${id}）` }
+          : null
+      );
     } else {
       // 退房：只有在 Step 1 才能选择房间
       if (checkoutStep !== 1) return;
@@ -191,6 +309,15 @@ export function FrontDeskPage() {
     if (!selectedRoomId) {
       setCheckinMessage({ type: "error", text: "请先选择房间" });
       return;
+    }
+    const reservation = reservations.find((r) => r.roomId === selectedRoomId);
+    const reservationMatched = matchReservationWithCustomer(reservation, customerInfo.custName, customerInfo.custId);
+    if (reservation && !reservationMatched) {
+      setCheckinMessage({ type: "error", text: "该房间有预定，请输入与预定一致的姓名/联系方式" });
+      return;
+    }
+    if (reservedSet.has(selectedRoomId)) {
+      setCheckinMessage({ type: "success", text: "预定匹配成功，正在为预定客人办理入住" });
     }
     if (occupiedSet.has(selectedRoomId)) {
       setCheckinMessage({ type: "error", text: "该房间已入住，请重新选择" });
@@ -221,6 +348,10 @@ export function FrontDeskPage() {
       setOrderCreated(true);
       setCheckinStep(4);
       setCheckinMessage({ type: "success", text: `住宿订单已创建，订单号：${data.orderId}` });
+      // 入住成功后，释放该房间的预定记录
+      if (reservation) {
+        setReservations((prev) => prev.filter((r) => r.roomId !== reservation.roomId));
+      }
       loadStatuses();
     }
   };
@@ -329,6 +460,78 @@ export function FrontDeskPage() {
     loadStatuses();
   };
 
+  const downloadCsv = (filename: string, rows: string[][]) => {
+    const csv = "\uFEFF" + rows
+      .map((row) => row.map((cell) => `"${String(cell ?? "").replace(/"/g, '""')}"`).join(","))
+      .join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const formatDate = (iso?: string | null) => {
+    if (!iso) return "--";
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return iso;
+    return d.toISOString().replace("T", " ").slice(0, 19);
+  };
+
+  const calcDurationSeconds = (start?: string | null, end?: string | null) => {
+    if (!start || !end) return 0;
+    const s = new Date(start).getTime();
+    const e = new Date(end).getTime();
+    if (Number.isNaN(s) || Number.isNaN(e) || e <= s) return 0;
+    return Math.round((e - s) / 1000);
+  };
+
+  const exportAcBill = () => {
+    if (!checkoutSummary?.acBill) {
+      setCheckoutMessage({ type: "error", text: "暂无空调账单可导出" });
+      return;
+    }
+    const bill = checkoutSummary.acBill;
+    const rows = [
+      ["房间号", "入住时间", "离开时间", "空调总费用"],
+      [bill.roomId, formatDate(bill.periodStart), formatDate(bill.periodEnd), bill.totalFee.toFixed(2)],
+    ];
+    downloadCsv(`ac-bill-${bill.roomId}.csv`, rows);
+    setCheckoutMessage({ type: "success", text: "空调账单已下载 (CSV)" });
+  };
+
+  const exportAcDetails = () => {
+    if (!checkoutSummary?.detailRecords?.length) {
+      setCheckoutMessage({ type: "error", text: "暂无空调详单可导出" });
+      return;
+    }
+    const rows: string[][] = [];
+    let cumulative = 0;
+    rows.push(["房间号", "请求时间", "服务开始时间", "服务结束时间", "服务时长(秒)", "风速", "当前费用", "累积费用"]);
+    checkoutSummary.detailRecords.forEach((rec) => {
+      const requestTime = formatDate(rec.startedAt);
+      const start = formatDate(rec.startedAt);
+      const end = formatDate(rec.endedAt);
+      const duration = calcDurationSeconds(rec.startedAt, rec.endedAt);
+      const currentFee = rec.feeValue ?? 0;
+      cumulative += currentFee;
+      rows.push([
+        rec.roomId,
+        requestTime,
+        start,
+        end,
+        String(duration),
+        rec.speed,
+        currentFee.toFixed(2),
+        cumulative.toFixed(2),
+      ]);
+    });
+    downloadCsv(`ac-detail-${checkoutSummary.roomId}.csv`, rows);
+    setCheckoutMessage({ type: "success", text: "空调详单已下载 (CSV)" });
+  };
+
   return (
     <div className="space-y-10 animate-fade-in">
       {/* 页面标题 */}
@@ -344,7 +547,7 @@ export function FrontDeskPage() {
         <div className="inline-flex rounded-full bg-[#f5f5f7] p-1">
           <button
             type="button"
-            onClick={() => setActiveTab("checkin")}
+            onClick={() => handleTabChange("checkin")}
             className={`px-6 py-2 rounded-full text-sm font-medium transition-all duration-200 ${
               activeTab === "checkin"
                 ? "bg-white text-[#1d1d1f] shadow-sm"
@@ -355,7 +558,7 @@ export function FrontDeskPage() {
           </button>
           <button
             type="button"
-            onClick={() => setActiveTab("checkout")}
+            onClick={() => handleTabChange("checkout")}
             className={`px-6 py-2 rounded-full text-sm font-medium transition-all duration-200 ${
               activeTab === "checkout"
                 ? "bg-white text-[#1d1d1f] shadow-sm"
@@ -371,7 +574,8 @@ export function FrontDeskPage() {
         {/* 左侧表单 */}
         <div className="lg:col-span-2">
           {activeTab === "checkin" ? (
-            <div className="rounded-2xl border border-black/[0.04] bg-white p-8">
+            <div className="space-y-6">
+              <div className="rounded-2xl border border-black/[0.04] bg-white p-8">
               {/* 步骤指示器 */}
               <div className="mb-6">
                 <div className="flex items-center justify-between text-xs mb-3">
@@ -533,6 +737,9 @@ export function FrontDeskPage() {
                       <span className="text-[10px] text-[#34c759] font-medium">✓ 已完成</span>
                     )}
                   </div>
+                  <p className="text-[11px] text-[#86868b] mb-3">
+                    已预定的房间需与预定姓名/联系方式一致才能办理入住。
+                  </p>
                   
                   <div className="flex items-center gap-3 mb-3">
                     <span className="text-xs text-[#86868b]">已选房间：</span>
@@ -647,6 +854,124 @@ export function FrontDeskPage() {
                     办理下一位顾客
                   </button>
                 )}
+              </div>
+              </div>
+
+              <div className="rounded-2xl border border-black/[0.04] bg-white p-6">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <h3 className="text-lg font-semibold text-[#1d1d1f]">预定房间</h3>
+                    <p className="mt-1 text-xs text-[#86868b]">预定后房间不可再被选择，需解除预定才能办理入住。</p>
+                  </div>
+                  <span className="px-2 py-1 rounded-md bg-[#fef3c7] text-[10px] text-[#92400e] font-medium border border-[#fcd34d]/70">
+                    预留
+                  </span>
+                </div>
+
+                {reservationMessage && (
+                  <div
+                    className={`mt-4 rounded-xl px-4 py-3 text-sm ${
+                      reservationMessage.type === "success"
+                        ? "bg-[#fef3c7] text-[#92400e] border border-[#fcd34d]/70"
+                        : "bg-[#ff3b30]/10 text-[#ff3b30]"
+                    }`}
+                  >
+                    {reservationMessage.text}
+                  </div>
+                )}
+
+                <div className="mt-4 space-y-3">
+                  <div className="grid grid-cols-2 gap-3">
+                    <input
+                      type="text"
+                      placeholder="房间号"
+                      value={reservationForm.roomId}
+                      onChange={(e) => setReservationForm({ ...reservationForm, roomId: e.target.value })}
+                      className="w-full rounded-lg border border-black/[0.08] bg-white px-3 py-2 text-sm"
+                    />
+                    <button
+                      type="button"
+                      onClick={fillReservationRoom}
+                      className="rounded-lg border border-[#fcd34d]/70 bg-[#fef3c7] px-3 py-2 text-sm font-medium text-[#92400e] transition-all hover:bg-[#fde68a] active:scale-[0.98]"
+                    >
+                      用右侧选中填充
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <input
+                      type="text"
+                      placeholder="预定人姓名"
+                      value={reservationForm.guestName}
+                      onChange={(e) => setReservationForm({ ...reservationForm, guestName: e.target.value })}
+                      className="w-full rounded-lg border border-black/[0.08] bg-white px-3 py-2 text-sm"
+                    />
+                    <input
+                      type="text"
+                      placeholder="联系方式（可选）"
+                      value={reservationForm.contact}
+                      onChange={(e) => setReservationForm({ ...reservationForm, contact: e.target.value })}
+                      className="w-full rounded-lg border border-black/[0.08] bg-white px-3 py-2 text-sm"
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <input
+                      type="datetime-local"
+                      value={reservationForm.eta}
+                      onChange={(e) => setReservationForm({ ...reservationForm, eta: e.target.value })}
+                      className="w-full rounded-lg border border-black/[0.08] bg-white px-3 py-2 text-sm"
+                    />
+                    <input
+                      type="text"
+                      placeholder="备注（可选）"
+                      value={reservationForm.note}
+                      onChange={(e) => setReservationForm({ ...reservationForm, note: e.target.value })}
+                      className="w-full rounded-lg border border-black/[0.08] bg-white px-3 py-2 text-sm"
+                    />
+                  </div>
+
+                  <div className="flex items-center gap-3">
+                    <button
+                      type="button"
+                      onClick={handleReserveRoom}
+                      className="rounded-xl bg-[#1d1d1f] px-4 py-2.5 text-sm font-medium text-white transition-all hover:bg-[#424245] active:scale-[0.98]"
+                    >
+                      确认预定
+                    </button>
+                    <p className="text-[11px] text-[#86868b]">同一房间再次提交会覆盖旧预定</p>
+                  </div>
+
+                  <div className="rounded-xl bg-[#f7f7f8] p-3 border border-black/[0.04]">
+                    {reservations.length > 0 ? (
+                      <div className="space-y-2 max-h-40 overflow-auto pr-1">
+                        {reservations.map((r) => (
+                          <div
+                            key={`${r.roomId}-${r.createdAt}`}
+                            className="flex items-center justify-between rounded-lg bg-white px-3 py-2 text-xs border border-[#ececec] shadow-sm"
+                          >
+                            <div className="space-y-0.5">
+                              <p className="text-[#1d1d1f] font-semibold">房间 {r.roomId} · {r.guestName}</p>
+                              <p className="text-[#86868b]">
+                                {(r.eta || "").replace("T", " ")}{r.contact ? ` · ${r.contact}` : ""}
+                              </p>
+                              {r.note && <p className="text-[#b45309]">{r.note}</p>}
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => handleCancelReservation(r.roomId)}
+                              className="text-[10px] px-2 py-1 rounded-md bg-[#fef3c7] text-[#92400e] border border-[#fcd34d]/70 hover:bg-[#fde68a] active:scale-95"
+                            >
+                              解除
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="text-[12px] text-[#86868b] italic">暂无预定记录</p>
+                    )}
+                  </div>
+                </div>
               </div>
             </div>
           ) : (
@@ -952,6 +1277,22 @@ export function FrontDeskPage() {
                     ¥{checkoutSummary.totalDue?.toFixed(2) ?? "0.00"}
                   </span>
                 </div>
+                <div className="grid grid-cols-2 gap-2 mb-4 text-[12px]">
+                  <button
+                    type="button"
+                    onClick={exportAcBill}
+                    className="h-[38px] rounded-lg bg-[#f4f4f5] text-[#0d0d0d] border border-black/[0.06] hover:bg-[#e8e8e9] active:scale-[0.98]"
+                  >
+                    导出空调账单 (CSV)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={exportAcDetails}
+                    className="h-[38px] rounded-lg bg-[#f4f4f5] text-[#0d0d0d] border border-black/[0.06] hover:bg-[#e8e8e9] active:scale-[0.98]"
+                  >
+                    导出空调详单 (CSV)
+                  </button>
+                </div>
 
                 {/* 按钮组 */}
                 <div className="flex gap-3 animate-[contentFadeIn_300ms_ease-out_300ms_both]">
@@ -1048,6 +1389,7 @@ export function FrontDeskPage() {
                   { key: "all", label: "全部" },
                   { key: "available", label: "空闲" },
                   { key: "occupied", label: "入住" },
+                  { key: "reserved", label: "已预定" },
                 ].map((item) => (
                   <button
                     key={item.key}
@@ -1095,6 +1437,10 @@ export function FrontDeskPage() {
                     已入住
                   </span>
                   <span className="flex items-center gap-2 text-xs text-[#86868b]">
+                    <span className="w-6 h-6 rounded-lg bg-[#fef3c7] border border-[#fcd34d] flex items-center justify-center text-[10px] text-[#92400e]">1</span>
+                    已预定
+                  </span>
+                  <span className="flex items-center gap-2 text-xs text-[#86868b]">
                     <span className="w-6 h-6 rounded-lg bg-[#0071e3] flex items-center justify-center text-[10px] text-white ring-2 ring-[#0071e3]/30 ring-offset-1">1</span>
                     已选中
                   </span>
@@ -1106,13 +1452,17 @@ export function FrontDeskPage() {
             <div className="space-y-3 max-h-[420px] overflow-y-auto pr-2 scrollbar-thin">
               {[9, 8, 7, 6, 5, 4, 3, 2, 1, 0].map((floor) => {
                 const floorRooms = Array.from({ length: 10 }, (_, i) => String(floor * 10 + i + 1));
-                const floorOccupied = floorRooms.filter(id => displayOccupiedSet.has(id)).length;
+                const floorReserved = floorRooms.filter((id) => reservedSet.has(id)).length;
+                const floorUnavailable = floorRooms.filter((id) => unavailableSet.has(id)).length;
                 
                 // 根据筛选条件决定是否显示该楼层
                 const hasVisibleRooms = floorRooms.some(id => {
                   const isOccupied = displayOccupiedSet.has(id);
-                  if (roomFilter === "available") return !isOccupied;
+                  const isReserved = reservedSet.has(id);
+                  const isUnavailable = isOccupied || isReserved;
+                  if (roomFilter === "available") return !isUnavailable;
                   if (roomFilter === "occupied") return isOccupied;
+                  if (roomFilter === "reserved") return isReserved;
                   return true;
                 });
 
@@ -1124,8 +1474,11 @@ export function FrontDeskPage() {
                     <div className="w-10 shrink-0 text-right">
                       <span className="text-xs font-semibold text-[#86868b]">{floor + 1}F</span>
                       <span className="block text-[10px] text-[#c7c7cc]">
-                        {activeTab === "checkin" && !roomStateChecked ? "?" : floorOccupied}/10
+                        {activeTab === "checkin" && !roomStateChecked ? "?" : floorUnavailable}/10
                       </span>
+                      {floorReserved > 0 && (
+                        <span className="block text-[10px] text-[#d97706]">预定 {floorReserved}</span>
+                      )}
                     </div>
                     
                     {/* 房间按钮 */}
@@ -1134,37 +1487,58 @@ export function FrontDeskPage() {
                         const isSelectedCheckin = activeTab === "checkin" && selectedRoomId === id;
                         const isSelectedCheckout = activeTab === "checkout" && checkoutRoomId === id;
                         const isSelected = isSelectedCheckin || isSelectedCheckout;
+                        const reservation = reservations.find((r) => r.roomId === id);
+                        const isReserved = !!reservation;
+                        const reservationMatched = matchReservationWithCustomer(reservation, customerInfo.custName, customerInfo.custId);
                         const isOccupied = displayOccupiedSet.has(id);
+                        const isUnavailable = isOccupied || (isReserved && !reservationMatched);
                         // 入住时：需要完成查询房态步骤才能选择
-                        const canSelectForCheckin = activeTab === "checkin" && roomStateChecked && !isOccupied && !orderCreated;
+                        const canSelectForCheckin =
+                          activeTab === "checkin" &&
+                          roomStateChecked &&
+                          !orderCreated &&
+                          ((isReserved && reservationMatched) || (!isReserved && !isOccupied));
                         // 退房时：只有 Step 1 且房间已入住才能选择
                         const canSelectForCheckout = activeTab === "checkout" && isOccupied && checkoutStep === 1;
                         const isSelectable = canSelectForCheckin || canSelectForCheckout;
                         
                         // 根据筛选隐藏房间
                         const isHidden = 
-                          (roomFilter === "available" && isOccupied) ||
-                          (roomFilter === "occupied" && !isOccupied);
+                          (roomFilter === "available" && isUnavailable) ||
+                          (roomFilter === "occupied" && !isOccupied) ||
+                          (roomFilter === "reserved" && !isReserved);
 
                         if (isHidden) {
                           return <div key={id} className="h-8" />; // 占位保持布局
                         }
 
                         // 入住流程中未查询房态时，显示为未知状态
-                        const showUnknown = activeTab === "checkin" && !roomStateChecked;
+                        const showUnknown = activeTab === "checkin" && !roomStateChecked && !isReserved;
+                        const buttonTitle = isReserved
+                          ? reservationMatched
+                            ? `匹配预定 · ${reservation?.guestName ?? ""}${reservation?.eta ? ` · ${reservation.eta}` : ""}`
+                            : `已预定${reservation?.guestName ? ` · ${reservation.guestName}` : ""}${reservation?.eta ? ` · ${reservation.eta}` : ""}`
+                          : isOccupied
+                          ? "已入住/空调运行中"
+                          : "可选房间";
 
                         return (
                           <button
                             key={id}
                             type="button"
+                            title={buttonTitle}
                             disabled={!isSelectable}
                             onClick={() => isSelectable && handleSelectRoom(id)}
                             className={[
                               "group relative h-8 rounded-lg text-[11px] font-medium transition-all duration-200",
                               isSelected
                                 ? "bg-[#0071e3] text-white ring-2 ring-[#0071e3]/30 ring-offset-1 scale-110 z-10"
-                                : showUnknown
+                              : showUnknown
                                 ? "bg-[#e5e5e5] text-[#86868b] border border-black/[0.04]"  // 未知状态：灰色
+                                : isReserved
+                                ? reservationMatched
+                                  ? "bg-[#ecfdf3] text-[#166534] border border-[#86efac]"
+                                  : "bg-[#fef3c7] text-[#92400e] border border-[#fcd34d]"
                                 : isOccupied
                                 ? "bg-[#1d1d1f] text-white/90"
                                 : "bg-[#f5f5f7] text-[#1d1d1f] border border-black/[0.06]",
@@ -1176,6 +1550,15 @@ export function FrontDeskPage() {
                                 : "",
                             ].join(" ")}
                           >
+                            {isReserved && (
+                              <span
+                                className={`absolute -top-1 -right-1 rounded-md text-white text-[9px] px-[6px] py-[1px] leading-none shadow-sm ${
+                                  reservationMatched ? "bg-[#16a34a]" : "bg-[#f59e0b]"
+                                }`}
+                              >
+                                预
+                              </span>
+                            )}
                             {id}
                             {/* 悬浮提示 */}
                             {isSelectable && (
@@ -1194,18 +1577,24 @@ export function FrontDeskPage() {
 
             {/* 底部统计卡片 */}
             <div className="mt-6 pt-5 border-t border-black/[0.04]">
-              <div className="grid grid-cols-3 gap-3">
-                <div className="rounded-xl bg-[#f5f5f7] p-3 text-center">
-                  <p className="text-2xl font-semibold text-[#34c759]">
-                    {activeTab === "checkin" && !roomStateChecked ? "?" : 100 - displayOccupiedSet.size}
+              <div className="grid grid-cols-4 gap-3">
+                <div className="rounded-xl bg-[#fef3c7] p-3 text-center border border-[#fcd34d]/60">
+                  <p className="text-2xl font-semibold text-[#d97706]">
+                    {reservedSet.size}
                   </p>
-                  <p className="text-[10px] text-[#86868b] mt-0.5">空闲房间</p>
+                  <p className="text-[10px] text-[#b45309] mt-0.5">已预定</p>
                 </div>
                 <div className="rounded-xl bg-[#f5f5f7] p-3 text-center">
                   <p className="text-2xl font-semibold text-[#1d1d1f]">
                     {activeTab === "checkin" && !roomStateChecked ? "?" : displayOccupiedSet.size}
                   </p>
                   <p className="text-[10px] text-[#86868b] mt-0.5">已入住</p>
+                </div>
+                <div className="rounded-xl bg-[#f5f5f7] p-3 text-center">
+                  <p className="text-2xl font-semibold text-[#34c759]">
+                    {activeTab === "checkin" && !roomStateChecked ? "?" : 100 - unavailableSet.size}
+                  </p>
+                  <p className="text-[10px] text-[#86868b] mt-0.5">可选房间</p>
                 </div>
                 <div className="rounded-xl bg-[#0071e3]/10 p-3 text-center">
                   <p className="text-2xl font-semibold text-[#0071e3]">{selectedRoomId ?? "—"}</p>

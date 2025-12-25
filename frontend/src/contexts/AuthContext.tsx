@@ -1,4 +1,5 @@
-import { createContext, useContext, useState, useEffect } from "react";
+/* eslint-disable react-refresh/only-export-components */
+import { createContext, useContext, useState } from "react";
 import type { ReactNode } from "react";
 
 export type Role = "customer" | "receptionist" | "manager" | "ac-admin" | "debug" | null;
@@ -18,20 +19,14 @@ const STORAGE_KEY = "ac_system_role";
 const ROOM_STORAGE_KEY = "ac_system_selected_room";
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [role, setRoleState] = useState<Role>(null);
-  const [selectedRoomId, setSelectedRoomIdState] = useState<string | null>(null);
-
-  // 从 localStorage 恢复状态
-  useEffect(() => {
-    const savedRole = localStorage.getItem(STORAGE_KEY) as Role;
-    const savedRoom = localStorage.getItem(ROOM_STORAGE_KEY);
-    if (savedRole) {
-      setRoleState(savedRole);
-    }
-    if (savedRoom) {
-      setSelectedRoomIdState(savedRoom);
-    }
-  }, []);
+  const [role, setRoleState] = useState<Role>(() => {
+    if (typeof window === "undefined") return null;
+    return (window.localStorage.getItem(STORAGE_KEY) as Role) ?? null;
+  });
+  const [selectedRoomId, setSelectedRoomIdState] = useState<string | null>(() => {
+    if (typeof window === "undefined") return null;
+    return window.localStorage.getItem(ROOM_STORAGE_KEY);
+  });
 
   const setRole = (newRole: Role) => {
     setRoleState(newRole);

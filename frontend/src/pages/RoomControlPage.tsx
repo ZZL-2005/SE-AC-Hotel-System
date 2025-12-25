@@ -1,12 +1,29 @@
-import { useCallback, useEffect, useRef, useState, useId } from "react";
+import { useCallback, useEffect, useMemo, useState, useId } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { FeePanel, RoomHeader, SpeedSelector, TempGauge } from "../components";
+import { FeePanel, SpeedSelector, TempGauge } from "../components";
 import { acClient, type RoomStateResponse } from "../api/acClient";
 import { frontdeskClient, type CheckOutResponse } from "../api/frontdeskClient";
 import { getSocket, subscribeRoom } from "../api/socket";
 
 // Apple 风格温度历史折线图
 type TempPoint = { time: string; temp: number };
+type MealItem = { id: string; name: string; price: number; desc: string; tag?: string };
+
+// 费率常量 (元/秒)
+const FEE_RATES: Record<string, number> = {
+  HIGH: 1.0 / 60,
+  MID: 0.5 / 60,
+  LOW: (1.0 / 3.0) / 60,
+};
+
+const MEAL_MENU: MealItem[] = [
+  { id: "noodle", name: "番茄牛肉面", price: 42, desc: "现煮汤面，20 分钟送达", tag: "热食" },
+  { id: "sandwich", name: "全麦鸡胸三明治", price: 36, desc: "轻食低油，附小沙拉", tag: "轻食" },
+  { id: "soup", name: "菌菇暖汤", price: 28, desc: "夜间微饿时的低盐热汤", tag: "暖身" },
+  { id: "fruit", name: "当季水果拼盘", price: 32, desc: "三人份，解腻解辣", tag: "清爽" },
+  { id: "coffee", name: "冷萃/热拿铁", price: 26, desc: "咖啡因续航，含燕麦奶选项", tag: "饮品" },
+  { id: "dessert", name: "岩烧芝士蛋糕", price: 30, desc: "小份甜点，深夜限定", tag: "甜品" },
+];
 
 function TempHistoryChart({ points }: { points: TempPoint[] }) {
   const gradientId = useId();
@@ -45,8 +62,6 @@ function TempHistoryChart({ points }: { points: TempPoint[] }) {
     .join(" ");
 
   const areaPath = `${linePath} L${width},${height} L0,${height} Z`;
-  const latest = points[points.length - 1];
-  const latestY = height - ((latest.temp - yMin) / range) * height;
 
   const gridLines = [0, 0.5, 1].map((p) => ({
     y: p * height,
@@ -128,9 +143,10 @@ export function RoomControlPage() {
   const [message, setMessage] = useState<string | null>(null);
   const [checkoutResult, setCheckoutResult] = useState<CheckOutResponse | null>(null);
   const [showCheckout, setShowCheckout] = useState(false);
+  const [checkoutLoading, setCheckoutLoading] = useState(false);
+  const [checkoutError, setCheckoutError] = useState<string | null>(null);
   const [isPoweredOn, setIsPoweredOn] = useState(false);
   const [autoDispatching, setAutoDispatching] = useState(false);
-  const throttleRef = useRef<number | null>(null);
   const [autoRestartThreshold, setAutoRestartThreshold] = useState(0.2);
 
   // 本地待提交的调节值
@@ -144,16 +160,120 @@ export function RoomControlPage() {
     { time: string; temp: number }[]
   >([]);
 
-  // 费率常量 (元/秒)
-  const FEE_RATES: Record<string, number> = {
-    HIGH: 1.0 / 60,
-    MID: 0.5 / 60,
-    LOW: (1.0 / 3.0) / 60,
-  };
-
   // 伪计费状态
   const [displayedCurrentFee, setDisplayedCurrentFee] = useState(0);
   const [displayedTotalFee, setDisplayedTotalFee] = useState(0);
+
+  // 客房订餐
+  const [showMealModal, setShowMealModal] = useState(false);
+  const [mealCart, setMealCart] = useState<Record<string, number>>({});
+  const [mealNote, setMealNote] = useState("");
+  const [mealMessage, setMealMessage] = useState<string | null>(null);
+  const [lastMealOrder, setLastMealOrder] = useState<{
+    items: Array<{ id: string; name: string; price: number; qty: number }>;
+    total: number;
+    note?: string;
+    createdAt: string;
+  } | null>(null);
+
+  const selectedMeals = useMemo(() =>
+    MEAL_MENU.filter((item) => mealCart[item.id])
+      .map((item) => ({ ...item, qty: mealCart[item.id] ?? 0 }))
+  , [mealCart]);
+
+  const mealTotal = useMemo(() => {
+    return selectedMeals.reduce((sum, item) => sum + item.price * item.qty, 0);
+  }, [selectedMeals]);
+
+  const downloadCsv = (filename: string, rows: string[][]) => {
+    const csv = "\uFEFF" + rows
+      .map((row) => row.map((cell) => `"${String(cell ?? "").replace(/"/g, '""')}"`).join(","))
+      .join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const formatDate = (iso?: string | null) => {
+    if (!iso) return "--";
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return iso;
+    return d.toISOString().replace("T", " ").slice(0, 19);
+  };
+
+  const calcDurationSeconds = (start?: string | null, end?: string | null) => {
+    if (!start || !end) return 0;
+    const s = new Date(start).getTime();
+    const e = new Date(end).getTime();
+    if (Number.isNaN(s) || Number.isNaN(e) || e <= s) return 0;
+    return Math.round((e - s) / 1000);
+  };
+
+  const exportAcBill = () => {
+    if (!checkoutResult?.acBill) {
+      setMessage("暂无空调账单可导出");
+      return;
+    }
+    const bill = checkoutResult.acBill;
+    const rows = [
+      ["房间号", "入住时间", "离开时间", "空调总费用"],
+      [bill.roomId, formatDate(bill.periodStart), formatDate(bill.periodEnd), bill.totalFee.toFixed(2)],
+    ];
+    downloadCsv(`ac-bill-${bill.roomId}.csv`, rows);
+    setMessage("空调账单已下载 (CSV)");
+  };
+
+  const exportAcDetails = () => {
+    if (!checkoutResult?.detailRecords?.length) {
+      setMessage("暂无空调详单可导出");
+      return;
+    }
+    const rows: string[][] = [];
+    let cumulative = 0;
+    rows.push(["房间号", "请求时间", "服务开始时间", "服务结束时间", "服务时长(秒)", "风速", "当前费用", "累积费用"]);
+    checkoutResult.detailRecords.forEach((rec) => {
+      const requestTime = formatDate(rec.startedAt); // 近似代指请求时间
+      const start = formatDate(rec.startedAt);
+      const end = formatDate(rec.endedAt);
+      const duration = calcDurationSeconds(rec.startedAt, rec.endedAt);
+      const currentFee = rec.feeValue ?? 0;
+      cumulative += currentFee;
+      rows.push([
+        rec.roomId,
+        requestTime,
+        start,
+        end,
+        String(duration),
+        rec.speed,
+        currentFee.toFixed(2),
+        cumulative.toFixed(2),
+      ]);
+    });
+    downloadCsv(`ac-detail-${checkoutResult.roomId}.csv`, rows);
+    setMessage("空调详单已下载 (CSV)");
+  };
+
+  const handleCheckout = async () => {
+    if (!roomId) return;
+    setCheckoutError(null);
+    setCheckoutLoading(true);
+    setCheckoutResult(null);
+    setShowCheckout(true);
+
+    const { data, error } = await frontdeskClient.checkOut(roomId);
+    setCheckoutLoading(false);
+    if (!data || error) {
+      const msg = error ?? "退房结算失败，请稍后重试";
+      setCheckoutError(msg);
+      setMessage(msg);
+      return;
+    }
+    setCheckoutResult(data);
+  };
 
   const applyResponse = (state?: RoomStateResponse | null) => {
     if (!state) return;
@@ -346,6 +466,43 @@ export function RoomControlPage() {
     setMessage("风速调节已应用。");
   };
 
+  const incrementMeal = (id: string) => {
+    setMealCart((prev) => ({ ...prev, [id]: (prev[id] ?? 0) + 1 }));
+    setMealMessage(null);
+  };
+
+  const decrementMeal = (id: string) => {
+    setMealCart((prev) => {
+      if (!prev[id]) return prev;
+      const nextQty = Math.max(0, (prev[id] ?? 0) - 1);
+      if (nextQty === 0) {
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      }
+      return { ...prev, [id]: nextQty };
+    });
+  };
+
+  const handleSubmitMealOrder = () => {
+    if (selectedMeals.length === 0) {
+      setMealMessage("请先选择要送达的菜品");
+      return;
+    }
+    const order = {
+      items: selectedMeals,
+      total: mealTotal,
+      note: mealNote.trim(),
+      createdAt: new Date().toISOString(),
+    };
+    setLastMealOrder(order);
+    setMealCart({});
+    setMealNote("");
+    setShowMealModal(false);
+    setMealMessage("已提交客房餐饮订单，预计 20 分钟送达");
+    setMessage("客房餐饮已提交，我们稍后电话确认。");
+  };
+
   useEffect(() => {
     if (!isPoweredOn) {
       return;
@@ -432,6 +589,15 @@ export function RoomControlPage() {
             }`} />
             {status === "SERVING" ? "送风服务中" : status === "WAITING" ? "排队等待" : "待机"}
           </span>
+        </div>
+        <div className="flex items-center justify-center gap-3">
+          <button
+            type="button"
+            onClick={handleCheckout}
+            className="rounded-full bg-[#1d1d1f] text-white px-5 py-2 text-sm font-medium hover:bg-[#424245] active:scale-[0.98] transition-all"
+          >
+            退房结算/导出
+          </button>
         </div>
       </header>
 
@@ -576,11 +742,153 @@ export function RoomControlPage() {
           </button>
 
           <FeePanel currentFee={currentFee} totalFee={totalFee} />
+
+          <div className="rounded-2xl bg-[#f5f5f7] p-5 space-y-3">
+            <div className="flex items-center justify-between">
+              <div>
+                <h4 className="text-sm font-semibold text-[#1d1d1f]">客房订餐</h4>
+                <p className="text-xs text-[#86868b]">不打扰空调控制，支持夜宵/饮品</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => { setMealMessage(null); setShowMealModal(true); }}
+                className="rounded-lg bg-[#1d1d1f] text-white px-3 py-2 text-sm font-medium hover:bg-[#424245] active:scale-[0.98] transition-all"
+              >
+                打开菜单
+              </button>
+            </div>
+
+            {mealMessage && (
+              <div className="text-[11px] text-[#10a37f] bg-white border border-[#10a37f]/30 rounded-lg px-3 py-2">
+                {mealMessage}
+              </div>
+            )}
+
+            {lastMealOrder ? (
+              <div className="text-xs text-[#86868b] space-y-2">
+                <div className="flex items-center justify-between text-[#1d1d1f] font-medium">
+                  <span>上次订单</span>
+                  <span>¥{lastMealOrder.total.toFixed(2)}</span>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {lastMealOrder.items.map((item) => (
+                    <span
+                      key={`${item.id}-${item.qty}`}
+                      className="px-2 py-1 rounded-full bg-white border border-[#e5e5e5] text-[#1d1d1f]"
+                    >
+                      {item.name} × {item.qty}
+                    </span>
+                  ))}
+                </div>
+                {lastMealOrder.note && (
+                  <p className="text-[11px] text-[#b45309]">备注：{lastMealOrder.note}</p>
+                )}
+                <p className="text-[10px] text-[#acacac]">
+                  提交于 {lastMealOrder.createdAt?.slice(11, 16) ?? "--"}
+                </p>
+              </div>
+            ) : (
+              <p className="text-xs text-[#86868b]">暂无客房餐饮订单，夜间也可呼叫送餐。</p>
+            )}
+          </div>
         </div>
       </div>
 
+      {showMealModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 backdrop-blur-md p-4">
+          <div className="w-full max-w-4xl bg-white rounded-3xl shadow-2xl overflow-hidden animate-fade-in">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-[#e5e5e5] bg-[#f9fafb]">
+              <div>
+                <p className="text-xs text-[#86868b]">房间 {roomId}</p>
+                <h3 className="text-lg font-semibold text-[#1d1d1f]">客房订餐</h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => { setShowMealModal(false); setMealMessage(null); }}
+                className="w-9 h-9 rounded-full bg-[#f5f5f7] border border-[#e5e5e5] text-[#1d1d1f] text-sm hover:bg-[#ececec] active:scale-95 transition-all"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="grid md:grid-cols-2 gap-4 p-6 max-h-[55vh] overflow-y-auto">
+              {MEAL_MENU.map((item) => {
+                const qty = mealCart[item.id] ?? 0;
+                return (
+                  <div
+                    key={item.id}
+                    className="rounded-xl border border-[#ececec] p-4 bg-[#f9fafb] hover:border-[#1d1d1f]/10 transition-all"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="space-y-1">
+                        <p className="text-sm font-semibold text-[#1d1d1f]">{item.name}</p>
+                        <p className="text-[11px] text-[#86868b] leading-relaxed">{item.desc}</p>
+                        <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-[#eef2ff] text-[10px] text-[#4f46e5]">
+                          {item.tag}
+                        </span>
+                      </div>
+                      <div className="text-right space-y-2">
+                        <p className="text-lg font-semibold text-[#1d1d1f]">¥{item.price}</p>
+                        <div className="inline-flex items-center gap-2 rounded-full bg-white border border-[#ececec] px-2 py-1">
+                          <button
+                            type="button"
+                            onClick={() => decrementMeal(item.id)}
+                            className="w-6 h-6 rounded-full bg-[#f5f5f7] text-[#1d1d1f] flex items-center justify-center hover:bg-[#e8e8ed] active:scale-95"
+                          >
+                            −
+                          </button>
+                          <span className="w-6 text-center text-sm font-semibold">{qty}</span>
+                          <button
+                            type="button"
+                            onClick={() => incrementMeal(item.id)}
+                            className="w-6 h-6 rounded-full bg-[#1d1d1f] text-white flex items-center justify-center hover:bg-[#424245] active:scale-95"
+                          >
+                            +
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            <div className="border-t border-[#e5e5e5] bg-[#f9fafb] p-6 space-y-3">
+              <div className="grid md:grid-cols-3 gap-3">
+                <div className="md:col-span-2">
+                  <textarea
+                    value={mealNote}
+                    onChange={(e) => setMealNote(e.target.value)}
+                    placeholder="口味、送达时间等备注"
+                    className="w-full rounded-2xl border border-[#e5e5e5] bg-white px-4 py-3 text-sm text-[#1d1d1f] min-h-[76px] focus:outline-none focus:ring-2 focus:ring-[#1d1d1f]/30 transition-all"
+                  />
+                </div>
+                <div className="flex flex-col justify-between gap-3">
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="text-[#86868b]">合计</span>
+                    <span className="text-2xl font-semibold text-[#1d1d1f]">¥{mealTotal.toFixed(2)}</span>
+                  </div>
+                  {mealMessage && (
+                    <div className="text-[11px] text-[#f97316] bg-white border border-[#f97316]/30 rounded-lg px-3 py-2">
+                      {mealMessage}
+                    </div>
+                  )}
+                  <button
+                    type="button"
+                    onClick={handleSubmitMealOrder}
+                    className="w-full rounded-xl bg-[#1d1d1f] px-4 py-3 text-sm font-medium text-white transition-all hover:bg-[#424245] active:scale-[0.98]"
+                  >
+                    提交订餐
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* 退房弹窗 - Apple 风格 */}
-      {showCheckout && checkoutResult && (
+      {showCheckout && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-xl p-4">
           <div className="max-h-[90vh] w-full max-w-xl overflow-auto glass rounded-3xl p-8 shadow-2xl">
             <div className="mb-8 text-center">
@@ -588,107 +896,159 @@ export function RoomControlPage() {
                 🧾
               </div>
               <h3 className="text-2xl font-semibold text-[#1d1d1f]">退房结算</h3>
-              <p className="mt-1 text-sm text-[#86868b]">房间 {checkoutResult.roomId}</p>
+              <p className="mt-1 text-sm text-[#86868b]">房间 {checkoutResult?.roomId ?? roomId}</p>
             </div>
 
-            <div className="space-y-4">
-              {/* 住宿账单 */}
-              <div className="rounded-2xl bg-[#f5f5f7] p-5">
-                <div className="flex items-center gap-3 mb-4">
-                  <span className="w-10 h-10 rounded-xl bg-white flex items-center justify-center text-lg">🏨</span>
-                  <div>
-                    <h4 className="font-medium text-[#1d1d1f]">住宿账单</h4>
-                    <p className="text-xs text-[#86868b]">#{checkoutResult.accommodationBill.billId}</p>
-                  </div>
-                </div>
-                <div className="space-y-2 text-sm">
-                  <div className="flex justify-between">
-                    <span className="text-[#86868b]">入住晚数</span>
-                    <span className="text-[#1d1d1f]">{checkoutResult.accommodationBill.nights} 晚 × ¥{checkoutResult.accommodationBill.ratePerNight}/晚</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-[#86868b]">房费小计</span>
-                    <span className="font-medium text-[#1d1d1f]">¥{checkoutResult.accommodationBill.roomFee.toFixed(2)}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-[#86868b]">押金</span>
-                    <span className="text-[#1d1d1f]">¥{checkoutResult.accommodationBill.deposit.toFixed(2)}</span>
-                  </div>
-                </div>
+            {checkoutLoading ? (
+              <div className="rounded-2xl bg-[#f5f5f7] p-6 text-center text-sm text-[#86868b]">
+                正在生成结账信息…
               </div>
-
-              {/* 空调账单 */}
-              {checkoutResult.acBill && (
+            ) : checkoutError ? (
+              <div className="rounded-2xl bg-[#ff3b30]/10 border border-[#ff3b30]/25 p-4 text-sm text-[#ff3b30]">
+                {checkoutError}
+              </div>
+            ) : checkoutResult ? (
+              <div className="space-y-4">
+                {/* 住宿账单 */}
                 <div className="rounded-2xl bg-[#f5f5f7] p-5">
                   <div className="flex items-center gap-3 mb-4">
-                    <span className="w-10 h-10 rounded-xl bg-white flex items-center justify-center text-lg">❄️</span>
+                    <span className="w-10 h-10 rounded-xl bg-white flex items-center justify-center text-lg">🏨</span>
                     <div>
-                      <h4 className="font-medium text-[#1d1d1f]">空调账单</h4>
-                      <p className="text-xs text-[#86868b]">#{checkoutResult.acBill.billId}</p>
+                      <h4 className="font-medium text-[#1d1d1f]">住宿账单</h4>
+                      <p className="text-xs text-[#86868b]">#{checkoutResult.accommodationBill.billId}</p>
                     </div>
                   </div>
                   <div className="space-y-2 text-sm">
                     <div className="flex justify-between">
-                      <span className="text-[#86868b]">计费时段</span>
-                      <span className="text-[#1d1d1f]">{checkoutResult.acBill.periodStart} → {checkoutResult.acBill.periodEnd}</span>
+                      <span className="text-[#86868b]">入住晚数</span>
+                      <span className="text-[#1d1d1f]">{checkoutResult.accommodationBill.nights} 晚 × ¥{checkoutResult.accommodationBill.ratePerNight}/晚</span>
                     </div>
                     <div className="flex justify-between">
-                      <span className="text-[#86868b]">费用合计</span>
-                      <span className="font-medium text-[#1d1d1f]">¥{checkoutResult.acBill.totalFee.toFixed(2)}</span>
+                      <span className="text-[#86868b]">房费小计</span>
+                      <span className="font-medium text-[#1d1d1f]">¥{checkoutResult.accommodationBill.roomFee.toFixed(2)}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-[#86868b]">押金</span>
+                      <span className="text-[#1d1d1f]">¥{checkoutResult.accommodationBill.deposit.toFixed(2)}</span>
                     </div>
                   </div>
                 </div>
-              )}
 
-              {/* 空调详单 */}
-              <details className="rounded-2xl bg-[#f5f5f7] p-5 group">
-                <summary className="flex items-center justify-between cursor-pointer select-none">
-                  <div className="flex items-center gap-3">
-                    <span className="w-10 h-10 rounded-xl bg-white flex items-center justify-center text-lg">📋</span>
-                    <div>
-                      <h4 className="font-medium text-[#1d1d1f]">使用详单</h4>
-                      <p className="text-xs text-[#86868b]">共 {checkoutResult.detailRecords.length} 条记录</p>
+                {/* 空调账单 */}
+                {checkoutResult.acBill && (
+                  <div className="rounded-2xl bg-[#f5f5f7] p-5">
+                    <div className="flex items-center gap-3 mb-4">
+                      <span className="w-10 h-10 rounded-xl bg-white flex items-center justify-center text-lg">❄️</span>
+                      <div>
+                        <h4 className="font-medium text-[#1d1d1f]">空调账单</h4>
+                        <p className="text-xs text-[#86868b]">#{checkoutResult.acBill.billId}</p>
+                      </div>
+                    </div>
+                    <div className="space-y-2 text-sm">
+                      <div className="flex justify-between">
+                        <span className="text-[#86868b]">计费时段</span>
+                        <span className="text-[#1d1d1f]">{checkoutResult.acBill.periodStart} → {checkoutResult.acBill.periodEnd}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-[#86868b]">费用合计</span>
+                        <span className="font-medium text-[#1d1d1f]">¥{checkoutResult.acBill.totalFee.toFixed(2)}</span>
+                      </div>
                     </div>
                   </div>
-                  <span className="text-[#86868b] group-open:rotate-180 transition-transform">▼</span>
-                </summary>
-                <ul className="mt-4 space-y-2 max-h-48 overflow-auto">
-                  {checkoutResult.detailRecords.map((rec) => (
-                    <li key={rec.recordId} className="rounded-xl bg-white p-3 text-xs">
-                      <div className="flex justify-between mb-1">
-                        <span className="text-[#1d1d1f]">{rec.speed} 档位</span>
-                        <span className="font-medium text-[#1d1d1f]">¥{rec.feeValue.toFixed(2)}</span>
-                      </div>
-                      <div className="text-[#86868b]">
-                        {rec.startedAt} → {rec.endedAt ?? "进行中"} · 费率 ¥{rec.ratePerMin}/min
-                      </div>
-                    </li>
-                  ))}
-                </ul>
-              </details>
+                )}
 
-              {/* 应付总计 */}
-              <div className="rounded-2xl bg-[#1d1d1f] p-5 text-white">
-                <div className="flex items-center justify-between">
-                  <span className="text-white/60">应付总计</span>
-                  <span className="text-3xl font-semibold">¥{checkoutResult.totalDue.toFixed(2)}</span>
+                {/* 空调详单 */}
+                <details className="rounded-2xl bg-[#f5f5f7] p-5 group">
+                  <summary className="flex items-center justify-between cursor-pointer select-none">
+                    <div className="flex items-center gap-3">
+                      <span className="w-10 h-10 rounded-xl bg-white flex items-center justify-center text-lg">📋</span>
+                      <div>
+                        <h4 className="font-medium text-[#1d1d1f]">使用详单</h4>
+                        <p className="text-xs text-[#86868b]">共 {checkoutResult.detailRecords.length} 条记录</p>
+                      </div>
+                    </div>
+                    <span className="text-[#86868b] group-open:rotate-180 transition-transform">▼</span>
+                  </summary>
+                  <ul className="mt-4 space-y-2 max-h-48 overflow-auto">
+                    {checkoutResult.detailRecords.map((rec) => (
+                      <li key={rec.recordId} className="rounded-xl bg-white p-3 text-xs">
+                        <div className="flex justify-between mb-1">
+                          <span className="text-[#1d1d1f]">{rec.speed} 档位</span>
+                          <span className="font-medium text-[#1d1d1f]">¥{rec.feeValue.toFixed(2)}</span>
+                        </div>
+                        <div className="text-[#86868b]">
+                          {rec.startedAt} → {rec.endedAt ?? "进行中"} · 费率 ¥{rec.ratePerMin}/min
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                </details>
+
+                {/* 应付总计 */}
+                <div className="rounded-2xl bg-[#1d1d1f] p-5 text-white space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-white/60">应付总计</span>
+                    <span className="text-3xl font-semibold">¥{checkoutResult.totalDue.toFixed(2)}</span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2 text-[12px]">
+                    <button
+                      type="button"
+                      onClick={exportAcBill}
+                      className="rounded-lg bg-white/10 border border-white/20 px-3 py-2 font-medium hover:bg-white/15 active:scale-[0.98]"
+                    >
+                      导出空调账单 (CSV)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={exportAcDetails}
+                      className="rounded-lg bg-white/10 border border-white/20 px-3 py-2 font-medium hover:bg-white/15 active:scale-[0.98]"
+                    >
+                      导出空调详单 (CSV)
+                    </button>
+                  </div>
                 </div>
               </div>
-            </div>
+            ) : (
+              <div className="rounded-2xl bg-[#f5f5f7] p-6 text-center text-sm text-[#86868b]">
+                暂无结账数据
+              </div>
+            )}
 
             <div className="mt-8 grid grid-cols-2 gap-3">
-              <button
-                className="rounded-xl bg-[#0071e3] px-5 py-4 text-sm font-medium text-white transition-all hover:bg-[#0077ed] active:scale-[0.98]"
-                onClick={() => navigate("/room-control")}
-              >
-                完成退房
-              </button>
-              <button
-                className="rounded-xl bg-[#f5f5f7] px-5 py-4 text-sm font-medium text-[#1d1d1f] transition-all hover:bg-[#e8e8ed] active:scale-[0.98]"
-                onClick={() => setShowCheckout(false)}
-              >
-                留在此页
-              </button>
+              {checkoutResult ? (
+                <>
+                  <button
+                    className="rounded-xl bg-[#0071e3] px-5 py-4 text-sm font-medium text-white transition-all hover:bg-[#0077ed] active:scale-[0.98]"
+                    onClick={() => navigate("/room-control")}
+                  >
+                    完成退房
+                  </button>
+                  <button
+                    className="rounded-xl bg-[#f5f5f7] px-5 py-4 text-sm font-medium text-[#1d1d1f] transition-all hover:bg-[#e8e8ed] active:scale-[0.98]"
+                    onClick={() => setShowCheckout(false)}
+                  >
+                    留在此页
+                  </button>
+                </>
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    disabled={checkoutLoading}
+                    onClick={handleCheckout}
+                    className="rounded-xl bg-[#0071e3] px-5 py-4 text-sm font-medium text-white transition-all hover:bg-[#0077ed] disabled:opacity-50 disabled:hover:bg-[#0071e3]"
+                  >
+                    重试
+                  </button>
+                  <button
+                    type="button"
+                    className="rounded-xl bg-[#f5f5f7] px-5 py-4 text-sm font-medium text-[#1d1d1f] transition-all hover:bg-[#e8e8ed] active:scale-[0.98]"
+                    onClick={() => setShowCheckout(false)}
+                  >
+                    关闭
+                  </button>
+                </>
+              )}
             </div>
           </div>
         </div>

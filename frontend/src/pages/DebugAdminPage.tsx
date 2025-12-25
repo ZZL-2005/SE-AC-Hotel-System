@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useMemo, useState, useCallback, useRef } from "react";
 import { useAuth } from "../contexts/AuthContext";
 import { monitorClient } from "../api/monitorClient";
 import { acClient } from "../api/acClient";
@@ -20,7 +20,13 @@ interface QueueItem {
 export function DebugAdminPage() {
   const { selectedRoomId, setSelectedRoomId } = useAuth();
   const [rooms, setRooms] = useState<RoomStatus[]>([]);
-  const [allRooms, setAllRooms] = useState<Array<{roomId: string, status: string}>>([]);
+  const allRooms = useMemo(() => {
+    const occupied = new Set(rooms.map((r) => r.roomId));
+    return Array.from({ length: 100 }, (_, idx) => {
+      const roomId = String(idx + 1);
+      return { roomId, status: occupied.has(roomId) ? "occupied" : "available" };
+    });
+  }, [rooms]);
   const [selectedRoom, setSelectedRoom] = useState<RoomStatus | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   
@@ -69,18 +75,6 @@ export function DebugAdminPage() {
     }
   }, [selectedRoomId]);
 
-  // 加载所有房间（包括未开放的）
-  const loadAllRooms = useCallback(async () => {
-    // 生成1-100的房间号
-    const roomList = [];
-    for (let i = 1; i <= 100; i++) {
-      const roomId = String(i);
-      const isOccupied = rooms.some(r => r.roomId === roomId);
-      roomList.push({ roomId, status: isOccupied ? 'occupied' : 'available' });
-    }
-    setAllRooms(roomList);
-  }, [rooms]);
-
   // 加载 TimeManager 状态
   const loadSystemStatus = useCallback(async () => {
     const { data } = await debugClient.getSystemStatus();
@@ -127,10 +121,6 @@ export function DebugAdminPage() {
 
     return () => window.clearInterval(interval);
   }, [loadRooms, loadSystemStatus, loadTimers, loadQueueStatus]);
-
-  useEffect(() => {
-    loadAllRooms();
-  }, [loadAllRooms]);
 
   const handleRoomSelect = (roomId: string) => {
     setSelectedRoomId(roomId);
@@ -179,7 +169,6 @@ export function DebugAdminPage() {
       } else {
         setMessage(`✅ 房间 ${roomId} 入住成功`);
         loadRooms();
-        loadAllRooms();
       }
     } catch (err) {
       setMessage(`❌ 入住失败: ${err}`);

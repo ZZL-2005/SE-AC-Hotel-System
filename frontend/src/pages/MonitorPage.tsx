@@ -1,7 +1,9 @@
-import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { FormEvent } from "react";
 import { RoomStatusGrid } from "../components";
 import { adminClient } from "../api/adminClient";
 import type { HyperParamSettings, HyperParamUpdatePayload } from "../api/adminClient";
+import { frontdeskClient, type BillsResponse } from "../api/frontdeskClient";
 import { monitorClient } from "../api/monitorClient";
 import type { RoomStatus } from "../types/rooms";
 import { getSocket, subscribeMonitor, unsubscribeMonitor } from "../api/socket";
@@ -132,6 +134,8 @@ export function MonitorPage() {
   const [selectedFloor, setSelectedFloor] = useState<number | null>(null); // null = 显示所有楼层
   const [highlightedRoomId, setHighlightedRoomId] = useState<string | null>(null);
   const [showActiveOnly, setShowActiveOnly] = useState(false); // 仅显示活跃房间
+  type RightTab = "floor" | "queue" | "control" | "log" | "realtime";
+  const [rightTab, setRightTab] = useState<RightTab>("queue");
   const [systemEvents, setSystemEvents] = useState<SystemEvent[]>([]); // 系统事件日志
   const prevRoomsRef = useRef<RoomStatus[]>([]); // 用于对比状态变化
   const [tempHistory, setTempHistory] = useState<Map<number, Array<{ time: Date; temp: number }>>>(new Map()); // 楼层温度历史数据
@@ -385,22 +389,16 @@ export function MonitorPage() {
     
     // 添加新事件，保留最近50条
     if (newEvents.length > 0) {
-      setSystemEvents(prev => [...newEvents, ...prev].slice(0, 50));
+      const timer = window.setTimeout(() => {
+        setSystemEvents((prev) => [...newEvents, ...prev].slice(0, 50));
+      }, 0);
+      prevRoomsRef.current = rooms;
+      return () => window.clearTimeout(timer);
     }
     
     // 更新前一次状态
     prevRoomsRef.current = rooms;
   }, [rooms]);
-
-  // 初始化时添加一条系统启动事件
-  useEffect(() => {
-    setSystemEvents([{
-      id: "system-start",
-      time: new Date(),
-      type: "start",
-      message: "中央空调监控系统启动",
-    }]);
-  }, []);
 
   const activeRooms = useMemo(() => rooms.filter((room) => room.status !== "idle" || room.isServing || room.isWaiting), [rooms]);
   const serving = useMemo(() => rooms.filter((room) => room.isServing), [rooms]);
@@ -454,37 +452,10 @@ export function MonitorPage() {
     ];
   }, [rooms]);
 
-  // 统计数据
-  const stats = useMemo(() => {
-    const avgTemp = rooms.length > 0 ? rooms.reduce((s, r) => s + r.currentTemp, 0) / rooms.length : 0;
-    const totalFee = rooms.reduce((s, r) => s + r.totalFee, 0);
-    const totalServed = rooms.reduce((s, r) => s + r.servedSeconds, 0);
-    const maxTemp = rooms.length > 0 ? Math.max(...rooms.map(r => r.currentTemp)) : 0;
-    const minTemp = rooms.length > 0 ? Math.min(...rooms.map(r => r.currentTemp)) : 0;
-    return { avgTemp, totalFee, totalServed, maxTemp, minTemp };
-  }, [rooms]);
-
-  // 风速分布
-  const speedDist = useMemo(() => {
-    const counts = { HIGH: 0, MID: 0, LOW: 0 };
-    rooms.forEach((r) => {
-      const s = r.speed || r.serviceSpeed || "";
-      if (s === "HIGH" || s === "高") counts.HIGH++;
-      else if (s === "MID" || s === "中") counts.MID++;
-      else if (s === "LOW" || s === "低") counts.LOW++;
-    });
-    return counts;
-  }, [rooms]);
-
-  // 模式分布
-  const modeDist = useMemo(() => {
-    let cooling = 0, heating = 0;
-    rooms.forEach((r) => {
-      if (r.mode === "cooling" || r.mode === "制冷") cooling++;
-      else if (r.mode === "heating" || r.mode === "制热") heating++;
-    });
-    return { cooling, heating };
-  }, [rooms]);
+  const realtimeRooms = useMemo(() => {
+    const ids = ["1", "2", "3", "4", "5"];
+    return ids.map((id) => allRooms.find((r) => String(r.roomId) === id) ?? null);
+  }, [allRooms]);
 
   // 楼层房间映射（每层10个房间）
   const floorRooms = useMemo(() => {
@@ -646,7 +617,7 @@ export function MonitorPage() {
 
   return (
     <div 
-      className="h-[calc(100vh-48px)] -mx-6 px-5 pt-0 pb-4 flex flex-col overflow-y-auto custom-scrollbar"
+      className="h-[calc(100vh-48px)] px-6 pt-0 pb-4 flex flex-col overflow-y-auto custom-scrollbar"
       style={{
         background: `#f5f5f7`,
       }}
@@ -753,150 +724,292 @@ export function MonitorPage() {
           )}
         </main>
 
-        {/* 右侧：楼层可视化 + 调度队列 */}
+        {/* 右侧：楼层/队列/控制台/日志（标签切换，避免拥挤） */}
         <aside className="w-full lg:w-[480px] flex flex-col gap-3 flex-shrink-0">
-          {/* 楼层3D可视化 */}
-          <FloorVisualization
-            floorRooms={floorRooms}
-            selectedFloor={selectedFloor}
-            onFloorSelect={setSelectedFloor}
-            onRoomClick={handleFloorRoomClick}
-          />
+          <div className="bg-white rounded-2xl shadow-sm border border-black/[0.04] p-2">
+            <div className="flex rounded-full bg-[#f5f5f7] p-1">
+              <button
+                type="button"
+                onClick={() => setRightTab("floor")}
+                className={`flex-1 px-3 py-2 rounded-full text-xs font-medium transition-all ${
+                  rightTab === "floor"
+                    ? "bg-white text-[#1d1d1f] shadow-sm"
+                    : "text-[#86868b] hover:text-[#1d1d1f]"
+                }`}
+              >
+                楼层
+              </button>
+              <button
+                type="button"
+                onClick={() => setRightTab("queue")}
+                className={`flex-1 px-3 py-2 rounded-full text-xs font-medium transition-all ${
+                  rightTab === "queue"
+                    ? "bg-white text-[#1d1d1f] shadow-sm"
+                    : "text-[#86868b] hover:text-[#1d1d1f]"
+                }`}
+              >
+                队列
+              </button>
+              <button
+                type="button"
+                onClick={() => setRightTab("control")}
+                className={`flex-1 px-3 py-2 rounded-full text-xs font-medium transition-all ${
+                  rightTab === "control"
+                    ? "bg-white text-[#1d1d1f] shadow-sm"
+                    : "text-[#86868b] hover:text-[#1d1d1f]"
+                }`}
+              >
+                控制
+              </button>
+              <button
+                type="button"
+                onClick={() => setRightTab("log")}
+                className={`flex-1 px-3 py-2 rounded-full text-xs font-medium transition-all ${
+                  rightTab === "log"
+                    ? "bg-white text-[#1d1d1f] shadow-sm"
+                    : "text-[#86868b] hover:text-[#1d1d1f]"
+                }`}
+              >
+                日志
+              </button>
+              <button
+                type="button"
+                onClick={() => setRightTab("realtime")}
+                className={`flex-1 px-3 py-2 rounded-full text-xs font-medium transition-all ${
+                  rightTab === "realtime"
+                    ? "bg-white text-[#1d1d1f] shadow-sm"
+                    : "text-[#86868b] hover:text-[#1d1d1f]"
+                }`}
+              >
+                1-5
+              </button>
+            </div>
+          </div>
 
-          {/* 调度队列 */}
-          <Panel title="调度队列" icon="scheduler" color="primary">
-            <div className="mb-4">
-              <div className="flex justify-between text-xs text-[#86868b] mb-2">
-                <span className="font-medium">服务槽占用</span>
-                <span className="font-mono font-semibold text-[#1d1d1f]">{serving.length} / 3</span>
-                  </div>
-              <div className="h-2.5 bg-[#f5f5f7] rounded-full overflow-hidden">
-                <div 
-                  className="h-full bg-[#1d1d1f] rounded-full transition-all duration-500"
-                  style={{ width: `${Math.min(100, (serving.length / 3) * 100)}%` }}
-                ></div>
-                </div>
-                  </div>
-            <div className="grid grid-cols-2 gap-3">
-              <QueueBox title="服务中" items={serving} type="serving" />
-              <QueueBox title="等待队列" items={waiting} type="waiting" />
-                  </div>
-          </Panel>
+          {rightTab === "floor" && (
+            <FloorVisualization
+              floorRooms={floorRooms}
+              selectedFloor={selectedFloor}
+              onFloorSelect={setSelectedFloor}
+              onRoomClick={handleFloorRoomClick}
+            />
+          )}
 
-          <Panel title="系统控制台" icon="building" color="blue">
-            <div className="space-y-5 max-h-[420px] overflow-y-auto pr-2 custom-scrollbar">
-              <div className="rounded-2xl bg-[#f5f5f7] px-4 py-4 border border-black/[0.03] flex flex-col gap-3 text-[11px] text-[#5c5c5f]">
-                <div>
-                  <p className="text-[#1d1d1f] font-semibold mb-1">快速开房间</p>
-                  <p>自定义房号、初始温度与房费，适合测试或临时调度。</p>
+          {rightTab === "queue" && (
+            <Panel title="调度队列" icon="scheduler" color="primary">
+              <div className="mb-4">
+                <div className="flex justify-between text-xs text-[#86868b] mb-2">
+                  <span className="font-medium">服务槽占用</span>
+                  <span className="font-mono font-semibold text-[#1d1d1f]">{serving.length} / 3</span>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setAdminMessage(null);
-                    setShowOpenRoomModal(true);
-                  }}
-                  className="w-full py-2.5 rounded-xl text-sm font-semibold text-white bg-[#1d1d1f] hover:bg-black transition-all"
-                >
-                  打开创建面板
-                </button>
+                <div className="h-2.5 bg-[#f5f5f7] rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-[#1d1d1f] rounded-full transition-all duration-500"
+                    style={{ width: `${Math.min(100, (serving.length / 3) * 100)}%` }}
+                  ></div>
+                </div>
               </div>
+              <div className="grid grid-cols-2 gap-3">
+                <QueueBox title="服务中" items={serving} type="serving" />
+                <QueueBox title="等待队列" items={waiting} type="waiting" />
+              </div>
+            </Panel>
+          )}
 
-              <div className="rounded-2xl bg-white px-4 py-4 border border-black/[0.05]">
-                <div className="flex items-center justify-between mb-4">
+          {rightTab === "control" && (
+            <Panel title="系统控制台" icon="building" color="blue">
+              <div className="space-y-5 max-h-[520px] overflow-y-auto pr-2 custom-scrollbar">
+                <div className="rounded-2xl bg-[#f5f5f7] px-4 py-4 border border-black/[0.03] flex flex-col gap-3 text-[11px] text-[#5c5c5f]">
                   <div>
-                    <p className="text-xs text-[#86868b] uppercase tracking-wide">Hyper Parameters</p>
-                    <h3 className="text-base font-semibold text-[#1d1d1f]">运行超参数</h3>
+                    <p className="text-[#1d1d1f] font-semibold mb-1">快速开房间</p>
+                    <p>自定义房号、初始温度与房费，适合测试或临时调度。</p>
                   </div>
                   <button
                     type="button"
-                    onClick={resetHyperForm}
-                    disabled={hyperFetching || hyperSaving}
-                    className="text-xs font-semibold text-[#1d1d1f] disabled:text-[#c7c7cc]"
+                    onClick={() => {
+                      setAdminMessage(null);
+                      setShowOpenRoomModal(true);
+                    }}
+                    className="w-full py-2.5 rounded-xl text-sm font-semibold text-white bg-[#1d1d1f] hover:bg-black transition-all"
                   >
-                    还原
+                    打开创建面板
                   </button>
                 </div>
-                {hyperFetching && !hyperParams ? (
-                  <p className="text-xs text-[#86868b]">参数加载中...</p>
-                ) : (
-                  <form className="space-y-4" onSubmit={handleHyperParamSave}>
-                    {hyperFieldGroups.map((group) => (
-                      <div key={group.title} className="space-y-2">
-                        <p className="text-[11px] text-[#86868b] font-medium">{group.title}</p>
-                        <div className="grid gap-3 md:grid-cols-2">
-                          {group.fields.map((field) => (
-                            <div key={field.key} className="flex flex-col gap-1.5">
-                              <label className="text-[11px] text-[#5c5c5f] font-medium">{field.label}</label>
-                              <div className="flex items-center gap-2">
-                                <input
-                                  type="number"
-                                  step={field.step ?? "1"}
-                                  className={`${adminInputClass} w-full`}
-                                  value={hyperForm[field.key]}
-                                  onChange={(e) => handleHyperFieldChange(field.key, e.target.value)}
-                                  disabled={hyperFetching}
-                                />
-                                {field.suffix && (
-                                  <span className="text-[11px] text-[#86868b] whitespace-nowrap">{field.suffix}</span>
-                                )}
-                              </div>
-                              {field.hint && <span className="text-[10px] text-[#86868b]">{field.hint}</span>}
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    ))}
-                    {hyperMessage && (
-                      <div
-                        className={`text-xs rounded-xl px-3 py-2 font-medium ${
-                          hyperMessage.type === "error"
-                            ? "bg-[#ff3b30]/10 text-[#ff3b30]"
-                            : "bg-[#34c759]/10 text-[#34c759]"
-                        }`}
-                      >
-                        {hyperMessage.text}
-                      </div>
-                    )}
-                    <div className="flex gap-3">
-                      <button
-                        type="button"
-                        onClick={resetHyperForm}
-                        disabled={hyperFetching || hyperSaving}
-                        className="flex-1 py-2.5 rounded-xl text-sm font-semibold bg-[#f5f5f7] text-[#1d1d1f] disabled:text-[#c7c7cc]"
-                      >
-                        重置表单
-                      </button>
-                      <button
-                        type="submit"
-                        disabled={hyperSaving || hyperFetching}
-                        className={`flex-1 py-2.5 rounded-xl text-sm font-semibold text-white transition-all ${
-                          hyperSaving || hyperFetching ? "bg-[#1d1d1f]/60 cursor-not-allowed" : "bg-[#1d1d1f] hover:bg-black"
-                        }`}
-                      >
-                        {hyperSaving ? "保存中..." : "保存参数"}
-                      </button>
+
+                <div className="rounded-2xl bg-white px-4 py-4 border border-black/[0.05]">
+                  <div className="flex items-center justify-between mb-4">
+                    <div>
+                      <p className="text-xs text-[#86868b] uppercase tracking-wide">Hyper Parameters</p>
+                      <h3 className="text-base font-semibold text-[#1d1d1f]">运行超参数</h3>
                     </div>
-                  </form>
+                    <button
+                      type="button"
+                      onClick={resetHyperForm}
+                      disabled={hyperFetching || hyperSaving}
+                      className="text-xs font-semibold text-[#1d1d1f] disabled:text-[#c7c7cc]"
+                    >
+                      还原
+                    </button>
+                  </div>
+                  {hyperFetching && !hyperParams ? (
+                    <p className="text-xs text-[#86868b]">参数加载中...</p>
+                  ) : (
+                    <form className="space-y-4" onSubmit={handleHyperParamSave}>
+                      {hyperFieldGroups.map((group) => (
+                        <div key={group.title} className="space-y-2">
+                          <p className="text-[11px] text-[#86868b] font-medium">{group.title}</p>
+                          <div className="grid gap-3 md:grid-cols-2">
+                            {group.fields.map((field) => (
+                              <div key={field.key} className="flex flex-col gap-1.5">
+                                <label className="text-[11px] text-[#5c5c5f] font-medium">{field.label}</label>
+                                <div className="flex items-center gap-2">
+                                  <input
+                                    type="number"
+                                    step={field.step ?? "1"}
+                                    className={`${adminInputClass} w-full`}
+                                    value={hyperForm[field.key]}
+                                    onChange={(e) => handleHyperFieldChange(field.key, e.target.value)}
+                                    disabled={hyperFetching}
+                                  />
+                                  {field.suffix && (
+                                    <span className="text-[11px] text-[#86868b] whitespace-nowrap">{field.suffix}</span>
+                                  )}
+                                </div>
+                                {field.hint && <span className="text-[10px] text-[#86868b]">{field.hint}</span>}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      ))}
+                      {hyperMessage && (
+                        <div
+                          className={`text-xs rounded-xl px-3 py-2 font-medium ${
+                            hyperMessage.type === "error"
+                              ? "bg-[#ff3b30]/10 text-[#ff3b30]"
+                              : "bg-[#34c759]/10 text-[#34c759]"
+                          }`}
+                        >
+                          {hyperMessage.text}
+                        </div>
+                      )}
+                      <div className="flex gap-3">
+                        <button
+                          type="button"
+                          onClick={resetHyperForm}
+                          disabled={hyperFetching || hyperSaving}
+                          className="flex-1 py-2.5 rounded-xl text-sm font-semibold bg-[#f5f5f7] text-[#1d1d1f] disabled:text-[#c7c7cc]"
+                        >
+                          重置表单
+                        </button>
+                        <button
+                          type="submit"
+                          disabled={hyperSaving || hyperFetching}
+                          className={`flex-1 py-2.5 rounded-xl text-sm font-semibold text-white transition-all ${
+                            hyperSaving || hyperFetching
+                              ? "bg-[#1d1d1f]/60 cursor-not-allowed"
+                              : "bg-[#1d1d1f] hover:bg-black"
+                          }`}
+                        >
+                          {hyperSaving ? "保存中..." : "保存参数"}
+                        </button>
+                      </div>
+                    </form>
+                  )}
+                </div>
+              </div>
+            </Panel>
+          )}
+
+          {rightTab === "log" && (
+            <Panel title="事件日志" icon="log" color="primary">
+              <div className="h-[360px] md:h-[520px] overflow-y-scroll custom-scrollbar pr-1 pb-6">
+                {systemEvents.length === 0 ? (
+                  <div className="flex items-center justify-center h-full text-[#86868b] text-xs">
+                    暂无事件记录
+                  </div>
+                ) : (
+                  systemEvents.map((event) => <EventLogItem key={event.id} event={event} />)
                 )}
               </div>
-            </div>
-          </Panel>
+            </Panel>
+          )}
 
-          {/* 系统事件日志 */}
-          <Panel title="事件日志" icon="log" color="primary" className="flex-1 min-h-0">
-            <div className="h-[200px] overflow-y-scroll custom-scrollbar pr-1 pb-6">
-              {systemEvents.length === 0 ? (
-                <div className="flex items-center justify-center h-full text-[#86868b] text-xs">
-                  暂无事件记录
+          {rightTab === "realtime" && (
+            <Panel title="1-5 实时详情" icon="building" color="blue">
+              <div className="space-y-3">
+                <div className="flex items-center justify-between gap-3">
+                  <p className="text-[11px] text-[#86868b]">同时查看 1-5 号房间空调状态</p>
+                  <span className="text-[10px] text-[#86868b] bg-[#f5f5f7] px-2 py-1 rounded-lg border border-black/[0.04] font-mono tabular-nums">
+                    {lastUpdated ? `更新 ${lastUpdated.toLocaleTimeString("zh-CN", { hour12: false })}` : "未更新"}
+                  </span>
                 </div>
-              ) : (
-                systemEvents.map((event) => (
-                  <EventLogItem key={event.id} event={event} />
-                ))
-              )}
-            </div>
-          </Panel>
+
+                <div className="overflow-x-auto rounded-xl border border-black/[0.04] bg-white">
+                  <table className="w-full text-xs">
+                    <thead className="bg-[#f5f5f7] text-[11px] text-[#86868b]">
+                      <tr>
+                        <th className="px-3 py-2 text-left font-medium">房间号</th>
+                        <th className="px-3 py-2 text-right font-medium">当前室温</th>
+                        <th className="px-3 py-2 text-right font-medium">目标温度</th>
+                        <th className="px-3 py-2 text-center font-medium">风速</th>
+                        <th className="px-3 py-2 text-right font-medium">当前费用</th>
+                        <th className="px-3 py-2 text-right font-medium">累计费用</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-black/[0.04]">
+                      {realtimeRooms.map((room, idx) => {
+                        const roomId = String(idx + 1);
+                        const statusLabel = room ? (room.isServing ? "服务中" : room.isWaiting ? "等待中" : "空闲") : "无数据";
+                        const statusDot = room
+                          ? room.isServing
+                            ? "bg-[#34c759]"
+                            : room.isWaiting
+                              ? "bg-[#ff9500]"
+                              : "bg-[#c7c7cc]"
+                          : "bg-[#c7c7cc]";
+                        return (
+                          <tr
+                            key={roomId}
+                            className={room ? "hover:bg-[#f5f5f7]/50 transition-colors cursor-pointer" : "text-[#86868b]"}
+                            onClick={() => room && setSelectedRoom(room)}
+                          >
+                            <td className="px-3 py-2">
+                              <div className="flex items-center gap-2">
+                                <span className={`w-2 h-2 rounded-full ${statusDot}`}></span>
+                                <span className="font-semibold text-[#1d1d1f]">#{roomId}</span>
+                                <span className="text-[10px] text-[#86868b] bg-[#f5f5f7] px-2 py-0.5 rounded-full border border-black/[0.04]">
+                                  {statusLabel}
+                                </span>
+                              </div>
+                            </td>
+                            <td className="px-3 py-2 text-right font-mono tabular-nums text-[#1d1d1f]">
+                              {room ? `${room.currentTemp.toFixed(1)}℃` : "--"}
+                            </td>
+                            <td className="px-3 py-2 text-right font-mono tabular-nums text-[#1d1d1f]">
+                              {room ? `${room.targetTemp.toFixed(1)}℃` : "--"}
+                            </td>
+                            <td className="px-3 py-2 text-center">
+                              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold bg-[#0071e3]/10 text-[#0071e3]">
+                                {room?.speed ?? "--"}
+                              </span>
+                            </td>
+                            <td className="px-3 py-2 text-right font-mono tabular-nums text-[#1d1d1f]">
+                              {room ? `¥${room.currentFee.toFixed(2)}` : "--"}
+                            </td>
+                            <td className="px-3 py-2 text-right font-mono tabular-nums text-[#1d1d1f]">
+                              {room ? `¥${room.totalFee.toFixed(2)}` : "--"}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+
+                <p className="text-[10px] text-[#86868b]">提示：点击某一行可打开该房间弹窗，查看详单分段。</p>
+              </div>
+            </Panel>
+          )}
         </aside>
                   </div>
 
@@ -1187,69 +1300,6 @@ function EventLogItem({ event }: { event: SystemEvent }) {
   );
 }
 
-// 数据卡片 - Apple风格
-function DataCard({ label, value, accent, size }: { label: string; value: string; accent: string; size?: string }) {
-  const accents: Record<string, { bg: string; text: string }> = {
-    blue: { bg: "bg-[#0071e3]/10", text: "text-[#0071e3]" },
-    orange: { bg: "bg-[#ff9500]/10", text: "text-[#ff9500]" },
-    green: { bg: "bg-[#34c759]/10", text: "text-[#34c759]" },
-  };
-  const a = accents[accent] || accents.blue;
-  const isLg = size === "lg";
-  
-  return (
-    <div className={`${a.bg} p-3 rounded-xl text-center`}>
-      <p className="text-[9px] text-[#86868b]">{label}</p>
-      <p className={`${isLg ? "text-xl" : "text-base"} font-bold ${a.text} font-mono`}>{value}</p>
-                  </div>
-  );
-}
-
-// 模式卡片 - Apple风格
-function ModeCard({ label, count, icon, color }: { label: string; count: number; icon: string; color: string }) {
-  const colors: Record<string, { bg: string; text: string }> = {
-    blue: { bg: "bg-[#0071e3]/10", text: "text-[#0071e3]" },
-    orange: { bg: "bg-[#ff9500]/10", text: "text-[#ff9500]" },
-  };
-  const c = colors[color] || colors.blue;
-  
-  return (
-    <div className={`${c.bg} p-3 rounded-xl flex items-center gap-2`}>
-      <span className="text-xl">{icon}</span>
-                  <div>
-        <p className="text-[9px] text-[#86868b]">{label}</p>
-        <p className={`text-lg font-bold ${c.text} font-mono`}>{count}</p>
-                  </div>
-                </div>
-  );
-}
-
-// 风速行 - Apple风格
-function SpeedRow({ label, count, total, color }: { label: string; count: number; total: number; color: string }) {
-  const percent = total > 0 ? (count / total) * 100 : 0;
-  const colors: Record<string, { bar: string; text: string }> = {
-    red: { bar: "bg-[#ff3b30]", text: "text-[#ff3b30]" },
-    orange: { bar: "bg-[#ff9500]", text: "text-[#ff9500]" },
-    green: { bar: "bg-[#34c759]", text: "text-[#34c759]" },
-  };
-  const c = colors[color] || colors.green;
-  
-  return (
-                  <div>
-      <div className="flex justify-between text-[10px] mb-1">
-        <span className="text-[#86868b] font-medium">{label}</span>
-        <span className={`font-bold font-mono ${c.text}`}>{count}</span>
-                  </div>
-      <div className="h-2 bg-[#f5f5f7] rounded-full overflow-hidden">
-        <div 
-          className={`h-full ${c.bar} rounded-full transition-all duration-500`}
-          style={{ width: `${percent}%` }}
-        ></div>
-                  </div>
-                </div>
-  );
-}
-
 // 楼层3D可视化组件 - Apple风格
 function FloorVisualization({
   floorRooms,
@@ -1285,7 +1335,7 @@ function FloorVisualization({
   };
 
   return (
-    <div className="bg-white rounded-2xl shadow-sm overflow-hidden flex flex-col border border-black/[0.04]" style={{ maxHeight: "65%" }}>
+    <div className="bg-white rounded-2xl shadow-sm overflow-hidden flex flex-col border border-black/[0.04]">
       {/* 头部 */}
       <div className="bg-[#f5f5f7] px-4 py-1.5 flex items-center justify-between border-b border-black/[0.04]">
         <div className="flex items-center gap-2">
@@ -2024,8 +2074,93 @@ function SingleFloorView({
   );
 }
 
+const calcDurationSeconds = (start?: string | null, end?: string | null) => {
+  if (!start || !end) return null;
+  const s = new Date(start).getTime();
+  const e = new Date(end).getTime();
+  if (Number.isNaN(s) || Number.isNaN(e) || e <= s) return null;
+  return Math.round((e - s) / 1000);
+};
+
 // 房间详情弹窗 - Apple风格
 function RoomDetailModal({ room, onClose }: { room: RoomStatus; onClose: () => void }) {
+  const [billLoading, setBillLoading] = useState(false);
+  const [billError, setBillError] = useState<string | null>(null);
+  const [acBill, setAcBill] = useState<BillsResponse["acBill"] | null>(null);
+  const [detailRecords, setDetailRecords] = useState<BillsResponse["detailRecords"]>([]);
+  type DetailRowItem = BillsResponse["detailRecords"][number] & { durationSeconds: number | null; cumulativeFee: number };
+
+  useEffect(() => {
+    let cancelled = false;
+    const run = async () => {
+      setBillLoading(true);
+      setBillError(null);
+      const { data, error } = await frontdeskClient.fetchBills(String(room.roomId));
+      if (cancelled) return;
+      setBillLoading(false);
+      if (!data || error) {
+        setBillError(error ?? "获取详单失败，请稍后重试");
+        setAcBill(null);
+        setDetailRecords([]);
+        return;
+      }
+      setAcBill(data.acBill ?? null);
+      setDetailRecords(Array.isArray(data.detailRecords) ? data.detailRecords : []);
+    };
+    void run();
+    return () => {
+      cancelled = true;
+    };
+  }, [room.roomId]);
+
+  const formatDateTime = (iso?: string | null) => {
+    if (!iso) return "--";
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return String(iso);
+    return d.toLocaleString("zh-CN", {
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+    });
+  };
+
+  const formatSpeed = (speed?: string | null) => {
+    const normalized = String(speed ?? "").trim().toUpperCase();
+    if (!normalized) return "--";
+    if (normalized === "HIGH") return "高";
+    if (normalized === "MID" || normalized === "MED" || normalized === "MEDIUM") return "中";
+    if (normalized === "LOW") return "低";
+    return String(speed);
+  };
+
+  const detailRows = useMemo<DetailRowItem[]>(() => {
+    const sorted = [...detailRecords].sort((a, b) => {
+      const ta = new Date(a.startedAt).getTime();
+      const tb = new Date(b.startedAt).getTime();
+      if (Number.isNaN(ta) && Number.isNaN(tb)) return 0;
+      if (Number.isNaN(ta)) return 1;
+      if (Number.isNaN(tb)) return -1;
+      return ta - tb;
+    });
+
+    return sorted.reduce<{ rows: DetailRowItem[]; cumulativeFee: number }>(
+      (acc, rec) => {
+        const fee = rec.feeValue ?? 0;
+        const cumulativeFee = acc.cumulativeFee + fee;
+        const nextRow: DetailRowItem = {
+          ...rec,
+          durationSeconds: calcDurationSeconds(rec.startedAt, rec.endedAt),
+          cumulativeFee,
+        };
+        return { cumulativeFee, rows: [...acc.rows, nextRow] };
+      },
+      { rows: [], cumulativeFee: 0 }
+    ).rows;
+  }, [detailRecords]);
+
   // 状态配置
   const statusConfig = {
     serving: { label: "服务中", color: "text-[#34c759]", icon: <span className="w-2 h-2 rounded-full bg-[#34c759]"></span> },
@@ -2038,11 +2173,11 @@ function RoomDetailModal({ room, onClose }: { room: RoomStatus; onClose: () => v
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4" onClick={onClose}>
       <div className="absolute inset-0 bg-black/30 backdrop-blur-sm"></div>
       <div
-        className="relative w-full max-w-lg bg-white rounded-2xl shadow-2xl"
+        className="relative w-full max-w-2xl bg-white rounded-2xl shadow-2xl max-h-[calc(100vh-2rem)] flex flex-col"
         onClick={(e) => e.stopPropagation()}
       >
         {/* 头部 */}
-        <div className="bg-[#f5f5f7] px-6 py-5 border-b border-black/[0.04] rounded-t-2xl">
+        <div className="bg-[#f5f5f7] px-6 py-5 border-b border-black/[0.04] rounded-t-2xl flex-shrink-0">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-4">
               <div className="w-14 h-14 bg-[#0071e3] rounded-2xl flex items-center justify-center text-white text-xl font-bold">
@@ -2068,7 +2203,7 @@ function RoomDetailModal({ room, onClose }: { room: RoomStatus; onClose: () => v
         </div>
 
         {/* 内容 */}
-        <div className="p-6 space-y-5">
+        <div className="p-6 space-y-5 overflow-y-auto custom-scrollbar flex-1">
           {/* 温度 */}
           <div className="grid grid-cols-2 gap-5">
             <div className="bg-[#f5f5f7] p-5 rounded-xl">
@@ -2096,10 +2231,85 @@ function RoomDetailModal({ room, onClose }: { room: RoomStatus; onClose: () => v
             <div className="h-px bg-black/[0.04]"></div>
             <DetailRow label="服务时长" value={`${room.servedSeconds}s`} />
           </div>
+
+          {/* 空调详单：各时段服务记录 */}
+          <div className="bg-[#f5f5f7] p-4 rounded-xl">
+            <div className="flex items-start justify-between gap-3 mb-3">
+              <div>
+                <p className="text-xs text-[#86868b]">空调详单</p>
+                <p className="text-sm font-semibold text-[#1d1d1f]">各时段服务记录</p>
+              </div>
+              <div className="flex flex-wrap items-center justify-end gap-2">
+                {acBill?.totalFee != null && (
+                  <span className="text-[10px] text-[#86868b] bg-white px-2 py-1 rounded-lg border border-black/[0.04]">
+                    合计 ¥{acBill.totalFee.toFixed(2)}
+                  </span>
+                )}
+                <span className="text-[10px] text-[#86868b] bg-white px-2 py-1 rounded-lg border border-black/[0.04]">
+                  {detailRecords.length} 条
+                </span>
+              </div>
+            </div>
+
+            {billLoading ? (
+              <div className="py-8 text-center text-xs text-[#86868b]">加载中…</div>
+            ) : billError ? (
+              <div className="rounded-xl bg-[#ff3b30]/10 border border-[#ff3b30]/30 px-3 py-2 text-xs text-[#ff3b30]">
+                {billError}
+              </div>
+            ) : detailRows.length === 0 ? (
+              <div className="py-8 text-center text-xs text-[#86868b]">暂无详单记录</div>
+            ) : (
+              <div className="overflow-x-auto">
+                <div className="min-w-[840px] max-h-64 overflow-y-auto custom-scrollbar rounded-xl border border-black/[0.04] bg-white">
+                  <table className="w-full text-xs">
+                    <thead className="sticky top-0 bg-[#f5f5f7] text-[11px] text-[#86868b]">
+                      <tr>
+                        <th className="px-3 py-2 text-left font-medium">房间号</th>
+                        <th className="px-3 py-2 text-left font-medium">请求时间</th>
+                        <th className="px-3 py-2 text-left font-medium">服务开始</th>
+                        <th className="px-3 py-2 text-left font-medium">服务结束</th>
+                        <th className="px-3 py-2 text-right font-medium">时长(s)</th>
+                        <th className="px-3 py-2 text-center font-medium">风速</th>
+                        <th className="px-3 py-2 text-right font-medium">当前费用</th>
+                        <th className="px-3 py-2 text-right font-medium">累积费用</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-black/[0.04]">
+                      {detailRows.map((rec) => (
+                        <tr key={rec.recordId} className="hover:bg-[#f5f5f7]/50 transition-colors">
+                          <td className="px-3 py-2 font-semibold text-[#1d1d1f]">#{rec.roomId}</td>
+                          <td className="px-3 py-2 font-mono tabular-nums text-[#86868b]">{formatDateTime(rec.startedAt)}</td>
+                          <td className="px-3 py-2 font-mono tabular-nums text-[#86868b]">{formatDateTime(rec.startedAt)}</td>
+                          <td className="px-3 py-2 font-mono tabular-nums text-[#86868b]">
+                            {rec.endedAt ? formatDateTime(rec.endedAt) : "进行中"}
+                          </td>
+                          <td className="px-3 py-2 text-right font-mono tabular-nums text-[#1d1d1f]">
+                            {rec.durationSeconds != null ? rec.durationSeconds : "--"}
+                          </td>
+                          <td className="px-3 py-2 text-center">
+                            <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold bg-[#0071e3]/10 text-[#0071e3]">
+                              {formatSpeed(rec.speed)}
+                            </span>
+                          </td>
+                          <td className="px-3 py-2 text-right font-mono tabular-nums text-[#1d1d1f]">
+                            ¥{(rec.feeValue ?? 0).toFixed(2)}
+                          </td>
+                          <td className="px-3 py-2 text-right font-mono tabular-nums text-[#1d1d1f]">
+                            ¥{rec.cumulativeFee.toFixed(2)}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+          </div>
         </div>
 
         {/* 底部 */}
-        <div className="px-6 pb-6">
+        <div className="px-6 pb-6 pt-2 flex-shrink-0">
               <button
             onClick={onClose}
             className="w-full py-3.5 bg-[#0071e3] text-white text-sm font-semibold rounded-xl hover:bg-[#0077ed] active:scale-[0.98] transition-all"

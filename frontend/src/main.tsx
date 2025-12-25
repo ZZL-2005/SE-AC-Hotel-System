@@ -7,11 +7,9 @@ import { AuthProvider } from "./contexts/AuthContext.tsx";
 import { ProtectedRoute } from "./components/ProtectedRoute.tsx";
 import {
   FrontDeskPage,
-  Home,
   MonitorPage,
   ReportPage,
   RoomControlPage,
-  RoomSelectorPage,
   LoginPage,
   CustomerPage,
   ReceptionistPage,

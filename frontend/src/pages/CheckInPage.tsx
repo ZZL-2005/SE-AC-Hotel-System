@@ -82,8 +82,12 @@ export function CheckInPage() {
     }
 
     const { data, error } = await frontdeskClient.checkIn({
-      ...form,
-      customerName: trimmedName,
+      custId: `TEMP-${Date.now()}`,
+      custName: trimmedName,
+      guestCount: 1,
+      checkInDate: new Date().toISOString(),
+      roomId: form.roomId,
+      deposit: form.deposit,
     });
 
     if (error) {
