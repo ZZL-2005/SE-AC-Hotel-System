@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException
@@ -48,6 +48,18 @@ class CheckInRequest(BaseModel):
 
 class CheckOutRequest(BaseModel):
     roomId: str = Field(..., alias="roomId")
+
+
+class MealItem(BaseModel):
+    id: str
+    name: str
+    price: float
+    qty: int
+
+
+class MealOrderRequest(BaseModel):
+    items: List[MealItem]
+    note: Optional[str] = None
 
 
 def _default_temperature() -> float:
@@ -160,3 +172,65 @@ def get_room_bills(room_id: str) -> Dict[str, Any]:
 @router.get("/frontdesk/status")
 def get_frontdesk_status() -> Dict[str, str]:
     return {"message": "Front desk API ready"}
+
+
+# ==================== 客房订餐 ====================
+
+@router.post("/rooms/{room_id}/meals")
+def create_meal_order(room_id: str, payload: MealOrderRequest) -> Dict[str, Any]:
+    """
+    提交客房订餐订单
+    """
+    if not payload.items:
+        raise HTTPException(status_code=400, detail="订单不能为空")
+    
+    total_fee = sum(item.price * item.qty for item in payload.items)
+    order_id = str(uuid4())
+    
+    order = {
+        "order_id": order_id,
+        "room_id": room_id,
+        "items": [{"id": i.id, "name": i.name, "price": i.price, "qty": i.qty} for i in payload.items],
+        "total_fee": total_fee,
+        "note": payload.note,
+        "created_at": datetime.utcnow(),
+    }
+    
+    repository.add_meal_order(order)
+    
+    return {
+        "orderId": order_id,
+        "roomId": room_id,
+        "items": order["items"],
+        "totalFee": total_fee,
+        "note": payload.note,
+        "createdAt": order["created_at"].isoformat(),
+    }
+
+
+@router.get("/rooms/{room_id}/meals")
+def list_meal_orders(room_id: str) -> Dict[str, Any]:
+    """
+    获取房间的订餐记录（本次入住期间）
+    """
+    # 获取本次入住时间
+    accommodation_order = repository.get_latest_accommodation_order(room_id)
+    check_in_at = accommodation_order.get("check_in_at") if accommodation_order else None
+    
+    orders = list(repository.list_meal_orders(room_id, since=check_in_at))
+    total_fee = sum(o["total_fee"] for o in orders)
+    
+    return {
+        "roomId": room_id,
+        "orders": [
+            {
+                "orderId": o["order_id"],
+                "items": o["items"],
+                "totalFee": o["total_fee"],
+                "note": o["note"],
+                "createdAt": o["created_at"].isoformat() if o["created_at"] else None,
+            }
+            for o in orders
+        ],
+        "totalFee": total_fee,
+    }

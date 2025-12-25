@@ -302,7 +302,7 @@ export function MonitorPage() {
     // 保留一个较长间隔的备用轮询，防止 WebSocket 断开时无法更新
     const interval = window.setInterval(() => {
       loadRoomsRef.current?.();
-    }, 30000);
+    }, 1000);
     
     return () => {
       cancelled = true;

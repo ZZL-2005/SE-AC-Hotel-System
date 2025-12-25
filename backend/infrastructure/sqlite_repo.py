@@ -1,6 +1,8 @@
 """SQLite-backed repository implementation."""
 from __future__ import annotations
 
+import json
+from datetime import datetime
 from typing import Iterable, List, Optional, TYPE_CHECKING
 
 from sqlmodel import select
@@ -18,6 +20,7 @@ from .models import (
     ACBillModel,
     AccommodationOrderModel,
     AccommodationBillModel,
+    MealOrderModel,
 )
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -257,6 +260,51 @@ class SQLiteRoomRepository(RoomRepository):
                 "total_fee": model.total_fee,
                 "created_at": model.created_at,
             }
+
+    # Meal orders ---------------------------------------------------------
+    def add_meal_order(self, order: dict) -> None:
+        with SessionLocal() as session, session.begin():
+            session.add(
+                MealOrderModel(
+                    order_id=order["order_id"],
+                    room_id=order["room_id"],
+                    items_json=json.dumps(order["items"], ensure_ascii=False),
+                    total_fee=order["total_fee"],
+                    note=order.get("note"),
+                    created_at=order["created_at"],
+                )
+            )
+
+    def list_meal_orders(self, room_id: str, since: Optional[datetime] = None) -> Iterable[dict]:
+        with SessionLocal() as session:
+            statement = (
+                select(MealOrderModel)
+                .where(MealOrderModel.room_id == room_id)
+                .order_by(MealOrderModel.created_at.asc())
+            )
+            if since:
+                statement = statement.where(MealOrderModel.created_at >= since)
+            models = session.exec(statement).all()
+            for model in models:
+                yield {
+                    "order_id": model.order_id,
+                    "room_id": model.room_id,
+                    "items": json.loads(model.items_json),
+                    "total_fee": model.total_fee,
+                    "note": model.note,
+                    "created_at": model.created_at,
+                }
+
+    def get_meal_total_fee(self, room_id: str, since: Optional[datetime] = None) -> float:
+        with SessionLocal() as session:
+            statement = (
+                select(MealOrderModel)
+                .where(MealOrderModel.room_id == room_id)
+            )
+            if since:
+                statement = statement.where(MealOrderModel.created_at >= since)
+            models = session.exec(statement).all()
+            return sum(model.total_fee for model in models)
 
     # Helpers --------------------------------------------------------------
     def _room_from_model(self, model: RoomModel) -> Room:

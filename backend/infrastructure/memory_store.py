@@ -1,6 +1,7 @@
 """In-memory data store intended for the prototype stage."""
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Dict, Iterable, List, Optional, TYPE_CHECKING
 
 from domain.room import Room
@@ -22,6 +23,7 @@ class InMemoryRoomRepository(RoomRepository):
         self._ac_bills: Dict[str, List[ACBill]] = {}
         self._accommodation_orders: List[dict] = []
         self._accommodation_bills: List[dict] = []
+        self._meal_orders: List[dict] = []
 
     def get_room(self, room_id: str) -> Optional[Room]:
         return self._rooms.get(room_id)
@@ -101,3 +103,18 @@ class InMemoryRoomRepository(RoomRepository):
         # Assuming created_at is sortable (datetime)
         room_bills.sort(key=lambda x: x["created_at"], reverse=True)
         return room_bills[0]
+
+    # Meal orders ---------------------------------------------------------
+    def add_meal_order(self, order: dict) -> None:
+        self._meal_orders.append(order)
+
+    def list_meal_orders(self, room_id: str, since: Optional[datetime] = None) -> Iterable[dict]:
+        orders = [o for o in self._meal_orders if o["room_id"] == room_id]
+        if since:
+            orders = [o for o in orders if o["created_at"] >= since]
+        orders.sort(key=lambda x: x["created_at"])
+        return orders
+
+    def get_meal_total_fee(self, room_id: str, since: Optional[datetime] = None) -> float:
+        orders = list(self.list_meal_orders(room_id, since))
+        return sum(o["total_fee"] for o in orders)

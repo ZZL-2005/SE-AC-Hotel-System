@@ -59,6 +59,7 @@ class CheckOutService:
 
         nights = order["nights"]
         deposit = order["deposit"]
+        check_in_at = order.get("check_in_at")
         
         # 从 TimeManager 获取实际入住时长（如果有计时器）
         accommodation_seconds = 0
@@ -83,6 +84,10 @@ class CheckOutService:
         ac_fee = ac_bill.total_fee if ac_bill else 0.0
         detail_records = ac_bill.details if ac_bill else []
 
+        # 获取订餐费用
+        meal_orders = list(self.repo.list_meal_orders(room_id, since=check_in_at))
+        meal_fee = sum(o["total_fee"] for o in meal_orders)
+
         accommodation_bill_id = str(uuid4())
         accommodation_bill = {
             "bill_id": accommodation_bill_id,
@@ -92,7 +97,7 @@ class CheckOutService:
         }
         self.repo.add_accommodation_bill(accommodation_bill)
 
-        total_due = room_fee + ac_fee - deposit
+        total_due = room_fee + ac_fee + meal_fee - deposit
 
         room.status = RoomStatus.VACANT
         room.is_serving = False
@@ -142,6 +147,19 @@ class CheckOutService:
                 }
                 for rec in detail_records
             ],
+            "mealBill": {
+                "totalFee": meal_fee,
+                "orders": [
+                    {
+                        "orderId": o["order_id"],
+                        "items": o["items"],
+                        "totalFee": o["total_fee"],
+                        "note": o["note"],
+                        "createdAt": o["created_at"].isoformat() if o["created_at"] else None,
+                    }
+                    for o in meal_orders
+                ],
+            },
             "totalDue": total_due,
         }
 
@@ -156,6 +174,11 @@ class CheckOutService:
         ac_bill = ac_bills[-1] if ac_bills else None
         
         detail_records = ac_bill.details if ac_bill else []
+
+        # 获取订餐记录
+        check_in_at = accommodation_order.get("check_in_at") if accommodation_order else None
+        meal_orders = list(self.repo.list_meal_orders(room_id, since=check_in_at))
+        meal_fee = sum(o["total_fee"] for o in meal_orders)
 
         acc_bill_data = None
         if accommodation_bill:
@@ -217,4 +240,17 @@ class CheckOutService:
                 }
                 for rec in detail_records
             ],
+            "mealBill": {
+                "totalFee": meal_fee,
+                "orders": [
+                    {
+                        "orderId": o["order_id"],
+                        "items": o["items"],
+                        "totalFee": o["total_fee"],
+                        "note": o["note"],
+                        "createdAt": o["created_at"].isoformat() if o["created_at"] else None,
+                    }
+                    for o in meal_orders
+                ],
+            },
         }

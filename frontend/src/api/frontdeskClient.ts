@@ -55,6 +55,16 @@ export type CheckOutResponse = {
     ratePerMin: number;
     feeValue: number;
   }>;
+  mealBill: {
+    totalFee: number;
+    orders: Array<{
+      orderId: string;
+      items: Array<{ id: string; name: string; price: number; qty: number }>;
+      totalFee: number;
+      note: string | null;
+      createdAt: string | null;
+    }>;
+  } | null;
   totalDue: number;
 };
 
@@ -68,6 +78,33 @@ export type BillsResponse = {
   } | null;
   acBill: CheckOutResponse["acBill"];
   detailRecords: CheckOutResponse["detailRecords"];
+  mealBill: CheckOutResponse["mealBill"];
+};
+
+export type MealOrderPayload = {
+  items: Array<{ id: string; name: string; price: number; qty: number }>;
+  note?: string;
+};
+
+export type MealOrderResponse = {
+  orderId: string;
+  roomId: string;
+  items: Array<{ id: string; name: string; price: number; qty: number }>;
+  totalFee: number;
+  note: string | null;
+  createdAt: string;
+};
+
+export type MealOrdersResponse = {
+  roomId: string;
+  orders: Array<{
+    orderId: string;
+    items: Array<{ id: string; name: string; price: number; qty: number }>;
+    totalFee: number;
+    note: string | null;
+    createdAt: string | null;
+  }>;
+  totalFee: number;
 };
 
 export const frontdeskClient = {
@@ -82,5 +119,14 @@ export const frontdeskClient = {
   },
   fetchBills(roomId: string): Promise<ApiResult<BillsResponse>> {
     return http<BillsResponse>(`/rooms/${roomId}/bills`);
+  },
+  createMealOrder(roomId: string, payload: MealOrderPayload): Promise<ApiResult<MealOrderResponse>> {
+    return http<MealOrderResponse>(`/rooms/${roomId}/meals`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  },
+  fetchMealOrders(roomId: string): Promise<ApiResult<MealOrdersResponse>> {
+    return http<MealOrdersResponse>(`/rooms/${roomId}/meals`);
   },
 };

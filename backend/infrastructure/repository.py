@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from datetime import datetime
 from typing import Iterable, Optional, TYPE_CHECKING
 
 from domain.room import Room
@@ -93,4 +94,19 @@ class RoomRepository(ABC):
 
     @abstractmethod
     def get_latest_accommodation_bill(self, room_id: str) -> Optional[dict]:
+        raise NotImplementedError
+
+    # Meal orders ---------------------------------------------------------
+    @abstractmethod
+    def add_meal_order(self, order: dict) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def list_meal_orders(self, room_id: str, since: "datetime | None" = None) -> Iterable[dict]:
+        """列出房间的订餐记录，可选过滤入住时间之后的"""
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_meal_total_fee(self, room_id: str, since: "datetime | None" = None) -> float:
+        """获取房间订餐总费用"""
         raise NotImplementedError

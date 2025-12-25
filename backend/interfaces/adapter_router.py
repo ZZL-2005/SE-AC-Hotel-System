@@ -63,6 +63,7 @@ async def export_bill(room_id: str) -> Response:
     # 提取数据
     accommodation_bill = bills_data.get("accommodationBill")
     ac_bill = bills_data.get("acBill")
+    meal_bill = bills_data.get("mealBill")
     
     # 检查是否有有效的账单数据
     if not accommodation_bill and not ac_bill:
@@ -77,7 +78,8 @@ async def export_bill(room_id: str) -> Response:
     room_fee = accommodation_bill.get("roomFee", 0.0) if accommodation_bill else 0.0
     nights = accommodation_bill.get("nights", 1) if accommodation_bill else 1
     rate_per_night = accommodation_bill.get("ratePerNight", 0.0) if accommodation_bill else 0.0
-    total_due = bills_data.get("totalDue", ac_fee + room_fee)
+    meal_fee = meal_bill.get("totalFee", 0.0) if meal_bill else 0.0
+    total_due = bills_data.get("totalDue", ac_fee + room_fee + meal_fee)
     
     # 当前时间
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -102,6 +104,7 @@ async def export_bill(room_id: str) -> Response:
 ------------------------------
 空调费用: {ac_fee:.2f} 元
 住宿费用: {room_fee:.2f} 元 ({rate_per_night:.1f}元/天 x {nights})
+餐饮费用: {meal_fee:.2f} 元
 ------------------------------
 总计应收: {total_due:.2f} 元"""
     

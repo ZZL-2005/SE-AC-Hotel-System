@@ -222,20 +222,38 @@ export function RoomControlPage() {
   };
 
   const exportAcBill = () => {
-    if (!checkoutResult?.acBill) {
-      setMessage("暂无空调账单可导出");
+    if (!checkoutResult) {
+      setMessage("暂无账单可导出");
       return;
     }
     const bill = checkoutResult.acBill;
-    const accommodationSeconds = checkoutResult.accommodationBill?.accommodationSeconds;
-    const startTime = typeof accommodationSeconds === "number" ? formatLogicTime(0) : formatDate(bill.periodStart);
-    const endTime = typeof accommodationSeconds === "number" ? formatLogicTime(accommodationSeconds) : formatDate(bill.periodEnd);
+    const accommodationBill = checkoutResult.accommodationBill;
+    const mealBill = checkoutResult.mealBill;
+    const accommodationSeconds = accommodationBill?.accommodationSeconds;
+    const startTime = bill && typeof accommodationSeconds === "number" ? formatLogicTime(0) : bill ? formatDate(bill.periodStart) : "--";
+    const endTime = bill && typeof accommodationSeconds === "number" ? formatLogicTime(accommodationSeconds) : bill ? formatDate(bill.periodEnd) : "--";
+    
+    const acFee = bill?.totalFee ?? 0;
+    const roomFee = accommodationBill?.roomFee ?? 0;
+    const mealFee = mealBill?.totalFee ?? 0;
+    const deposit = accommodationBill?.deposit ?? 0;
+    const totalDue = checkoutResult.totalDue;
+    
     const rows = [
-      ["房间号", "入住时间", "离开时间", "空调总费用"],
-      [bill.roomId, startTime, endTime, bill.totalFee.toFixed(2)],
+      ["房间号", "入住时间", "离开时间", "空调费用", "住宿费用", "餐饮费用", "押金", "应付总计"],
+      [
+        checkoutResult.roomId,
+        startTime,
+        endTime,
+        acFee.toFixed(2),
+        roomFee.toFixed(2),
+        mealFee.toFixed(2),
+        deposit.toFixed(2),
+        totalDue.toFixed(2),
+      ],
     ];
-    downloadCsv(`ac-bill-${bill.roomId}.csv`, rows);
-    setMessage("空调账单已下载 (CSV)");
+    downloadCsv(`bill-${checkoutResult.roomId}.csv`, rows);
+    setMessage("综合账单已下载 (CSV)");
   };
 
   const exportAcDetails = () => {
@@ -347,6 +365,20 @@ export function RoomControlPage() {
     applyResponse(data);
   }, [roomId]);
 
+  // 加载已有订餐记录
+  const loadMealOrders = useCallback(async () => {
+    const { data } = await frontdeskClient.fetchMealOrders(roomId);
+    if (data && data.orders.length > 0) {
+      const lastOrder = data.orders[data.orders.length - 1];
+      setLastMealOrder({
+        items: lastOrder.items.map((i) => ({ ...i, desc: "", tag: "" })),
+        total: lastOrder.totalFee,
+        note: lastOrder.note ?? "",
+        createdAt: lastOrder.createdAt ?? "",
+      });
+    }
+  }, [roomId]);
+
   useEffect(() => {
     if (!roomId) {
       navigate("/room-control", { replace: true });
@@ -355,6 +387,7 @@ export function RoomControlPage() {
     
     // 初始加载一次
     loadState();
+    loadMealOrders();
     
     // 订阅房间状态更新（Socket.IO）
     const socket = getSocket();
@@ -500,16 +533,28 @@ export function RoomControlPage() {
     });
   };
 
-  const handleSubmitMealOrder = () => {
+  const handleSubmitMealOrder = async () => {
     if (selectedMeals.length === 0) {
       setMealMessage("请先选择要送达的菜品");
       return;
     }
+    
+    // 调用后端 API 持久化订餐
+    const { data, error } = await frontdeskClient.createMealOrder(roomId, {
+      items: selectedMeals.map((m) => ({ id: m.id, name: m.name, price: m.price, qty: m.qty })),
+      note: mealNote.trim() || undefined,
+    });
+    
+    if (error) {
+      setMealMessage(`订餐失败: ${error}`);
+      return;
+    }
+    
     const order = {
       items: selectedMeals,
-      total: mealTotal,
+      total: data?.totalFee ?? mealTotal,
       note: mealNote.trim(),
-      createdAt: new Date().toISOString(),
+      createdAt: data?.createdAt ?? new Date().toISOString(),
     };
     setLastMealOrder(order);
     setMealCart({});
@@ -1006,6 +1051,45 @@ export function RoomControlPage() {
                   </ul>
                 </details>
 
+                {/* 餐饮账单 */}
+                {checkoutResult.mealBill && checkoutResult.mealBill.orders.length > 0 && (
+                  <details className="rounded-2xl bg-[#f5f5f7] p-5 group">
+                    <summary className="flex items-center justify-between cursor-pointer select-none">
+                      <div className="flex items-center gap-3">
+                        <span className="w-10 h-10 rounded-xl bg-white flex items-center justify-center text-lg">🍽️</span>
+                        <div>
+                          <h4 className="font-medium text-[#1d1d1f]">餐饮账单</h4>
+                          <p className="text-xs text-[#86868b]">共 {checkoutResult.mealBill.orders.length} 笔订单</p>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-3">
+                        <span className="font-medium text-[#1d1d1f]">¥{checkoutResult.mealBill.totalFee.toFixed(2)}</span>
+                        <span className="text-[#86868b] group-open:rotate-180 transition-transform">▼</span>
+                      </div>
+                    </summary>
+                    <ul className="mt-4 space-y-2 max-h-48 overflow-auto">
+                      {checkoutResult.mealBill.orders.map((order) => (
+                        <li key={order.orderId} className="rounded-xl bg-white p-3 text-xs">
+                          <div className="flex justify-between mb-2">
+                            <span className="text-[#86868b]">{order.createdAt?.slice(11, 16) ?? "--"}</span>
+                            <span className="font-medium text-[#1d1d1f]">¥{order.totalFee.toFixed(2)}</span>
+                          </div>
+                          <div className="flex flex-wrap gap-1">
+                            {order.items.map((item) => (
+                              <span key={item.id} className="px-2 py-0.5 rounded-full bg-[#f5f5f7] text-[#1d1d1f]">
+                                {item.name} × {item.qty}
+                              </span>
+                            ))}
+                          </div>
+                          {order.note && (
+                            <p className="mt-1 text-[#86868b]">备注: {order.note}</p>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                  </details>
+                )}
+
                 {/* 应付总计 */}
                 <div className="rounded-2xl bg-[#1d1d1f] p-5 text-white space-y-3">
                   <div className="flex items-center justify-between">
@@ -1018,7 +1102,7 @@ export function RoomControlPage() {
                       onClick={exportAcBill}
                       className="rounded-lg bg-white/10 border border-white/20 px-3 py-2 font-medium hover:bg-white/15 active:scale-[0.98]"
                     >
-                      导出空调账单 (CSV)
+                      导出综合账单 (CSV)
                     </button>
                     <button
                       type="button"

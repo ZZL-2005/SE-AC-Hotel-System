@@ -85,3 +85,13 @@ class AccommodationBillModel(SQLModel, table=True):
     room_id: str = Field(index=True)
     total_fee: float
     created_at: datetime
+
+
+class MealOrderModel(SQLModel, table=True):
+    """客房订餐记录"""
+    order_id: str = Field(primary_key=True)
+    room_id: str = Field(index=True)
+    items_json: str  # JSON: [{"id": "noodle", "name": "番茄牛肉面", "price": 42, "qty": 1}, ...]
+    total_fee: float
+    note: Optional[str] = None
+    created_at: datetime
