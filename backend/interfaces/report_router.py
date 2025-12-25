@@ -102,7 +102,14 @@ def _derive_detail_stats(rows: List[ACDetailRecordModel]) -> Dict[str, Any]:
     for row in rows:
         if not row.ended_at:
             continue
-        duration_minutes = max((row.ended_at - row.started_at).total_seconds() / 60.0, 0.0)
+
+        duration_seconds: float
+        if row.logic_start_seconds is not None and row.logic_end_seconds is not None:
+            duration_seconds = float(max(int(row.logic_end_seconds) - int(row.logic_start_seconds), 0))
+        else:
+            duration_seconds = float(max((row.ended_at - row.started_at).total_seconds(), 0.0))
+
+        duration_minutes = duration_seconds / 60.0
         fee_value = float(row.fee_value or 0.0)
         kwh = float(row.rate_per_min or 0.0) * duration_minutes
         speed = (row.speed or "MID").upper()
@@ -185,4 +192,3 @@ def _derive_detail_stats(rows: List[ACDetailRecordModel]) -> Dict[str, Any]:
         "hourly_speed": hourly_speed,
         "kpi": kpi,
     }
-

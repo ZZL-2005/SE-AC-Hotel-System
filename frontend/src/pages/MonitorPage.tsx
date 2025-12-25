@@ -2127,6 +2127,14 @@ function RoomDetailModal({ room, onClose }: { room: RoomStatus; onClose: () => v
     });
   };
 
+  const formatLogicTime = (seconds?: number | null) => {
+    if (seconds == null || !Number.isFinite(seconds)) return "--";
+    const total = Math.max(0, Math.floor(seconds));
+    const mm = String(Math.floor(total / 60)).padStart(2, "0");
+    const ss = String(total % 60).padStart(2, "0");
+    return `T+${mm}:${ss}`;
+  };
+
   const formatSpeed = (speed?: string | null) => {
     const normalized = String(speed ?? "").trim().toUpperCase();
     if (!normalized) return "--";
@@ -2138,6 +2146,12 @@ function RoomDetailModal({ room, onClose }: { room: RoomStatus; onClose: () => v
 
   const detailRows = useMemo<DetailRowItem[]>(() => {
     const sorted = [...detailRecords].sort((a, b) => {
+      const la = a.logicStartSeconds;
+      const lb = b.logicStartSeconds;
+      if (typeof la === "number" && typeof lb === "number") return la - lb;
+      if (typeof la === "number") return -1;
+      if (typeof lb === "number") return 1;
+
       const ta = new Date(a.startedAt).getTime();
       const tb = new Date(b.startedAt).getTime();
       if (Number.isNaN(ta) && Number.isNaN(tb)) return 0;
@@ -2150,9 +2164,15 @@ function RoomDetailModal({ room, onClose }: { room: RoomStatus; onClose: () => v
       (acc, rec) => {
         const fee = rec.feeValue ?? 0;
         const cumulativeFee = acc.cumulativeFee + fee;
+        const durationSeconds =
+          typeof rec.durationSeconds === "number"
+            ? rec.durationSeconds
+            : typeof rec.logicStartSeconds === "number" && typeof rec.logicEndSeconds === "number"
+              ? Math.max(0, Math.round(rec.logicEndSeconds - rec.logicStartSeconds))
+              : calcDurationSeconds(rec.startedAt, rec.endedAt);
         const nextRow: DetailRowItem = {
           ...rec,
-          durationSeconds: calcDurationSeconds(rec.startedAt, rec.endedAt),
+          durationSeconds,
           cumulativeFee,
         };
         return { cumulativeFee, rows: [...acc.rows, nextRow] };
@@ -2279,10 +2299,18 @@ function RoomDetailModal({ room, onClose }: { room: RoomStatus; onClose: () => v
                       {detailRows.map((rec) => (
                         <tr key={rec.recordId} className="hover:bg-[#f5f5f7]/50 transition-colors">
                           <td className="px-3 py-2 font-semibold text-[#1d1d1f]">#{rec.roomId}</td>
-                          <td className="px-3 py-2 font-mono tabular-nums text-[#86868b]">{formatDateTime(rec.startedAt)}</td>
-                          <td className="px-3 py-2 font-mono tabular-nums text-[#86868b]">{formatDateTime(rec.startedAt)}</td>
                           <td className="px-3 py-2 font-mono tabular-nums text-[#86868b]">
-                            {rec.endedAt ? formatDateTime(rec.endedAt) : "进行中"}
+                            {rec.logicStartSeconds != null ? formatLogicTime(rec.logicStartSeconds) : formatDateTime(rec.startedAt)}
+                          </td>
+                          <td className="px-3 py-2 font-mono tabular-nums text-[#86868b]">
+                            {rec.logicStartSeconds != null ? formatLogicTime(rec.logicStartSeconds) : formatDateTime(rec.startedAt)}
+                          </td>
+                          <td className="px-3 py-2 font-mono tabular-nums text-[#86868b]">
+                            {rec.logicEndSeconds != null
+                              ? formatLogicTime(rec.logicEndSeconds)
+                              : rec.endedAt
+                                ? formatDateTime(rec.endedAt)
+                                : "进行中"}
                           </td>
                           <td className="px-3 py-2 text-right font-mono tabular-nums text-[#1d1d1f]">
                             {rec.durationSeconds != null ? rec.durationSeconds : "--"}

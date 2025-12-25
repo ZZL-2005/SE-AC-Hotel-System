@@ -480,6 +480,14 @@ const matchReservationWithCustomer = (reservation?: Reservation | null, name?: s
     return d.toISOString().replace("T", " ").slice(0, 19);
   };
 
+  const formatLogicTime = (seconds?: number | null) => {
+    if (seconds == null || !Number.isFinite(seconds)) return "--";
+    const total = Math.max(0, Math.floor(seconds));
+    const mm = String(Math.floor(total / 60)).padStart(2, "0");
+    const ss = String(total % 60).padStart(2, "0");
+    return `T+${mm}:${ss}`;
+  };
+
   const calcDurationSeconds = (start?: string | null, end?: string | null) => {
     if (!start || !end) return 0;
     const s = new Date(start).getTime();
@@ -494,9 +502,12 @@ const matchReservationWithCustomer = (reservation?: Reservation | null, name?: s
       return;
     }
     const bill = checkoutSummary.acBill;
+    const accommodationSeconds = checkoutSummary.accommodationBill?.accommodationSeconds;
+    const startTime = typeof accommodationSeconds === "number" ? formatLogicTime(0) : formatDate(bill.periodStart);
+    const endTime = typeof accommodationSeconds === "number" ? formatLogicTime(accommodationSeconds) : formatDate(bill.periodEnd);
     const rows = [
       ["房间号", "入住时间", "离开时间", "空调总费用"],
-      [bill.roomId, formatDate(bill.periodStart), formatDate(bill.periodEnd), bill.totalFee.toFixed(2)],
+      [bill.roomId, startTime, endTime, bill.totalFee.toFixed(2)],
     ];
     downloadCsv(`ac-bill-${bill.roomId}.csv`, rows);
     setCheckoutMessage({ type: "success", text: "空调账单已下载 (CSV)" });
@@ -511,10 +522,15 @@ const matchReservationWithCustomer = (reservation?: Reservation | null, name?: s
     let cumulative = 0;
     rows.push(["房间号", "请求时间", "服务开始时间", "服务结束时间", "服务时长(秒)", "风速", "当前费用", "累积费用"]);
     checkoutSummary.detailRecords.forEach((rec) => {
-      const requestTime = formatDate(rec.startedAt);
-      const start = formatDate(rec.startedAt);
-      const end = formatDate(rec.endedAt);
-      const duration = calcDurationSeconds(rec.startedAt, rec.endedAt);
+      const requestTime = rec.logicStartSeconds != null ? formatLogicTime(rec.logicStartSeconds) : formatDate(rec.startedAt);
+      const start = rec.logicStartSeconds != null ? formatLogicTime(rec.logicStartSeconds) : formatDate(rec.startedAt);
+      const end = rec.logicEndSeconds != null ? formatLogicTime(rec.logicEndSeconds) : formatDate(rec.endedAt);
+      const duration =
+        typeof rec.durationSeconds === "number"
+          ? rec.durationSeconds
+          : rec.logicStartSeconds != null && rec.logicEndSeconds != null
+            ? Math.max(0, Math.round(rec.logicEndSeconds - rec.logicStartSeconds))
+            : calcDurationSeconds(rec.startedAt, rec.endedAt);
       const currentFee = rec.feeValue ?? 0;
       cumulative += currentFee;
       rows.push([
@@ -1216,7 +1232,9 @@ const matchReservationWithCustomer = (reservation?: Reservation | null, name?: s
                       <div className="flex justify-between">
                         <span className="text-[#6e6e80]">计费周期</span>
                         <span className="text-[#0d0d0d]">
-                          {checkoutSummary.acBill.periodStart?.slice(5, 10).replace("-", "/")} → {checkoutSummary.acBill.periodEnd?.slice(5, 10).replace("-", "/")}
+                          {typeof checkoutSummary.accommodationBill?.accommodationSeconds === "number"
+                            ? `${formatLogicTime(0)} → ${formatLogicTime(checkoutSummary.accommodationBill.accommodationSeconds)}`
+                            : `${formatDate(checkoutSummary.acBill.periodStart)} → ${formatDate(checkoutSummary.acBill.periodEnd)}`}
                         </span>
                       </div>
                     </div>
@@ -1248,7 +1266,8 @@ const matchReservationWithCustomer = (reservation?: Reservation | null, name?: s
                                      bg-white border border-[#ececec] shadow-sm"
                         >
                           <span className="text-[#8e8ea0] tabular-nums font-mono text-[11px]">
-                            {rec.startedAt?.slice(11, 16) ?? "—"} → {rec.endedAt?.slice(11, 16) ?? "—"}
+                            {rec.logicStartSeconds != null ? formatLogicTime(rec.logicStartSeconds) : formatDate(rec.startedAt)} →{" "}
+                            {rec.logicEndSeconds != null ? formatLogicTime(rec.logicEndSeconds) : rec.endedAt ? formatDate(rec.endedAt) : "进行中"}
                           </span>
                           <span className="px-2 py-0.5 rounded-md bg-[#f0f0f0] text-[#0d0d0d] text-[10px] font-medium">
                             {rec.speed}

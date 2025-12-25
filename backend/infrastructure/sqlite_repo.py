@@ -116,6 +116,8 @@ class SQLiteRoomRepository(RoomRepository):
                 speed=record.speed,
                 started_at=record.started_at,
                 ended_at=record.ended_at,
+                logic_start_seconds=record.logic_start_seconds,
+                logic_end_seconds=record.logic_end_seconds,
                 rate_per_min=record.rate_per_min,
                 fee_value=record.fee_value,
                 timer_id=record.timer_id,
@@ -130,6 +132,8 @@ class SQLiteRoomRepository(RoomRepository):
             model.speed = record.speed
             model.started_at = record.started_at
             model.ended_at = record.ended_at
+            model.logic_start_seconds = record.logic_start_seconds
+            model.logic_end_seconds = record.logic_end_seconds
             model.rate_per_min = record.rate_per_min
             model.fee_value = record.fee_value
             model.timer_id = record.timer_id
@@ -309,6 +313,8 @@ class SQLiteRoomRepository(RoomRepository):
             speed=model.speed,
             started_at=model.started_at,
             ended_at=model.ended_at,
+            logic_start_seconds=model.logic_start_seconds,
+            logic_end_seconds=model.logic_end_seconds,
             rate_per_min=model.rate_per_min,
             fee_value=model.fee_value,
             timer_id=model.timer_id,

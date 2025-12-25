@@ -18,6 +18,17 @@ router = APIRouter(prefix="/adapter", tags=["adapter"])
 
 # 内部 HTTP 基础 URL (本地回环)
 INTERNAL_BASE_URL = "http://127.0.0.1:8000"
+# NOTE: Prefer logical time fields when available.
+
+
+def _format_logic_time(seconds: Any) -> str:
+    try:
+        total = int(seconds)
+    except (TypeError, ValueError):
+        return ""
+    if total < 0:
+        total = 0
+    return f"T+{total // 60:02d}:{total % 60:02d}"
 
 
 async def _call_internal_api(method: str, path: str, **kwargs) -> Dict[str, Any]:
@@ -123,28 +134,49 @@ async def export_detail(room_id: str) -> Response:
         # 提取字段
         started_at = record.get("startedAt", "")
         ended_at = record.get("endedAt", "")
+        logic_start = record.get("logicStartSeconds")
+        logic_end = record.get("logicEndSeconds")
+        duration = record.get("durationSeconds")
         speed = record.get("speed", "MID")
         fee_value = record.get("feeValue", 0.0)
         
-        # 格式化时间
-        try:
-            start_dt = datetime.fromisoformat(started_at.replace('Z', '+00:00'))
-            start_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
-        except:
-            start_str = started_at
-        
-        try:
-            if ended_at:
-                end_dt = datetime.fromisoformat(ended_at.replace('Z', '+00:00'))
-                end_str = end_dt.strftime("%Y-%m-%d %H:%M:%S")
-                # 计算服务时长(秒)
-                duration = int((end_dt - start_dt).total_seconds())
-            else:
-                end_str = "运行中"
+        # 格式化时间（优先使用逻辑时间，缺失时回退到墙钟时间）
+        start_dt = None
+        start_str = _format_logic_time(logic_start) if logic_start is not None else ""
+        end_str = _format_logic_time(logic_end) if logic_end is not None else ""
+
+        if not start_str:
+            try:
+                start_dt = datetime.fromisoformat(str(started_at).replace("Z", "+00:00"))
+                start_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
+            except Exception:
+                start_str = str(started_at)
+
+        if not end_str:
+            try:
+                if ended_at:
+                    end_dt = datetime.fromisoformat(str(ended_at).replace("Z", "+00:00"))
+                    end_str = end_dt.strftime("%Y-%m-%d %H:%M:%S")
+                else:
+                    end_str = "运行中"
+            except Exception:
+                end_str = str(ended_at) if ended_at else "运行中"
+
+        # Prefer backend-provided logical duration, then derive from logic timestamps.
+        if duration is None and logic_start is not None and logic_end is not None:
+            try:
+                duration = max(0, int(logic_end) - int(logic_start))
+            except (TypeError, ValueError):
+                duration = None
+        if duration is None:
+            try:
+                if start_dt and ended_at:
+                    end_dt = datetime.fromisoformat(str(ended_at).replace("Z", "+00:00"))
+                    duration = max(0, int((end_dt - start_dt).total_seconds()))
+                else:
+                    duration = 0
+            except Exception:
                 duration = 0
-        except:
-            end_str = ended_at if ended_at else "运行中"
-            duration = 0
         
         # 风速映射: HIGH/MID/LOW -> high/medium/low
         speed_map = {"HIGH": "high", "MID": "medium", "LOW": "low"}

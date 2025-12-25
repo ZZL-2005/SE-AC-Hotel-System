@@ -51,6 +51,7 @@ class BillingService:
         """详单分段逻辑: 新会话/风速变化开新段."""
         self.close_current_detail_record(room_id, timestamp)
         rate = self._rate_for_speed(speed)
+        logic_start_seconds = self._accommodation_elapsed_seconds(room_id)
         
         # 创建详单计时器（如果 TimeManager 可用）
         timer_id = None
@@ -66,6 +67,7 @@ class BillingService:
             started_at=timestamp,
             rate_per_min=rate,
             fee_value=0.0,
+            logic_start_seconds=logic_start_seconds,
             timer_id=timer_id,
         )
         self.current_records[room_id] = record
@@ -79,9 +81,19 @@ class BillingService:
         
         # 从计时器获取实际累计费用（如果有）
         timer_handle = self._detail_timers.pop(room_id, None)
+        detail_elapsed_seconds: Optional[int] = None
         if timer_handle and timer_handle.is_valid:
+            detail_elapsed_seconds = timer_handle.elapsed_seconds
             record.fee_value = timer_handle.current_fee
             timer_handle.cancel()
+
+        record.logic_end_seconds = self._accommodation_elapsed_seconds(room_id)
+        if (
+            record.logic_start_seconds is None
+            and record.logic_end_seconds is not None
+            and detail_elapsed_seconds is not None
+        ):
+            record.logic_start_seconds = max(0, record.logic_end_seconds - detail_elapsed_seconds)
         
         record.ended_at = timestamp
         self.repository.update_detail_record(record)
@@ -137,3 +149,15 @@ class BillingService:
     # Helpers --------------------------------------------------------------
     def _rate_for_speed(self, speed: str) -> float:
         return self.rate_map.get(speed, self.rate_map["MID"])
+
+    def _accommodation_elapsed_seconds(self, room_id: str) -> Optional[int]:
+        if not self.time_manager:
+            return None
+        order = self.repository.get_latest_accommodation_order(room_id)
+        timer_id = order.get("timer_id") if order else None
+        if not timer_id:
+            return None
+        timer_handle = self.time_manager.get_timer_by_id(timer_id)
+        if not timer_handle or not timer_handle.is_valid:
+            return None
+        return timer_handle.elapsed_seconds

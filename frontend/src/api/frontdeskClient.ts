@@ -34,6 +34,7 @@ export type CheckOutResponse = {
     nights: number;
     ratePerNight: number;
     deposit: number;
+    accommodationSeconds?: number;
   };
   acBill: {
     billId: string;
@@ -48,6 +49,9 @@ export type CheckOutResponse = {
     speed: string;
     startedAt: string;
     endedAt: string | null;
+    logicStartSeconds: number | null;
+    logicEndSeconds: number | null;
+    durationSeconds: number | null;
     ratePerMin: number;
     feeValue: number;
   }>;

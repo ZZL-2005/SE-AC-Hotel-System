@@ -140,57 +140,13 @@ def check_in(payload: CheckInRequest) -> Dict[str, Any]:
 
 @router.post("/checkout")
 def check_out(payload: CheckOutRequest) -> Dict[str, Any]:
-    room = repository.get_room(payload.roomId)
-    if not room:
-        raise HTTPException(status_code=404, detail="Room not found")
-
-    # Ensure service + wait entries cleaned and detail segments closed
-    ac_service.power_off(payload.roomId)
-    _remove_wait_entry(payload.roomId)
-
-    order = _latest_accommodation_order(payload.roomId)
-    if not order:
-        raise HTTPException(status_code=400, detail="Room has no active accommodation order.")
-
-    rate = _accommodation_rate(payload.roomId)
-    room_fee = float(order.nights) * rate
-    deposit = float(order.deposit)
-
-    ac_bill = billing_service.aggregate_records_to_bill(payload.roomId)
-    ac_fee = ac_bill.total_fee if ac_bill else 0.0
-    detail_records = ac_bill.details if ac_bill else []
-
-    accommodation_bill_id = str(uuid4())
-    accommodation_bill = {
-        "bill_id": accommodation_bill_id,
-        "room_id": payload.roomId,
-        "total_fee": room_fee,
-        "created_at": datetime.utcnow(),
-    }
-    repository.add_accommodation_bill(accommodation_bill)
-
-    total_due = room_fee + ac_fee - deposit
-
-    room.status = RoomStatus.VACANT
-    room.is_serving = False
-    room.speed = "MID"
-    room.target_temp = _default_temperature()
-    room.total_fee = 0.0
-    repository.save_room(room)
-
-    return {
-        "roomId": payload.roomId,
-        "accommodationBill": {
-            "billId": accommodation_bill_id,
-            "roomFee": room_fee,
-            "nights": order.nights,
-            "ratePerNight": rate,
-            "deposit": deposit,
-        },
-        "acBill": _serialize_ac_bill(ac_bill),
-        "detailRecords": [_serialize_detail(rec) for rec in detail_records],
-        "totalDue": total_due,
-    }
+    try:
+        return checkout_service.check_out(payload.roomId)
+    except ValueError as exc:
+        detail = str(exc)
+        if "not found" in detail.lower():
+            raise HTTPException(status_code=404, detail=detail) from exc
+        raise HTTPException(status_code=400, detail=detail) from exc
 
 
 @router.get("/rooms/{room_id}/bills")

@@ -8,13 +8,15 @@ from typing import Optional
 
 @dataclass
 class ACDetailRecord:
-    """# PPT 计费规则: 详单需要记录每一段风速/时间/费用."""
+    """A single AC service segment, used for bills and detailed statements."""
 
     record_id: str
     room_id: str
     speed: str
     started_at: datetime
     ended_at: Optional[datetime] = None
+    logic_start_seconds: Optional[int] = None  # seconds since latest check-in (TimeManager)
+    logic_end_seconds: Optional[int] = None  # seconds since latest check-in (TimeManager)
     rate_per_min: float = 0.0
     fee_value: float = 0.0
-    timer_id: Optional[str] = None  # 关联 TimeManager 计时器
+    timer_id: Optional[str] = None  # associated TimeManager detail timer

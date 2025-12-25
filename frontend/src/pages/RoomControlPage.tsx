@@ -205,6 +205,14 @@ export function RoomControlPage() {
     return d.toISOString().replace("T", " ").slice(0, 19);
   };
 
+  const formatLogicTime = (seconds?: number | null) => {
+    if (seconds == null || !Number.isFinite(seconds)) return "--";
+    const total = Math.max(0, Math.floor(seconds));
+    const mm = String(Math.floor(total / 60)).padStart(2, "0");
+    const ss = String(total % 60).padStart(2, "0");
+    return `T+${mm}:${ss}`;
+  };
+
   const calcDurationSeconds = (start?: string | null, end?: string | null) => {
     if (!start || !end) return 0;
     const s = new Date(start).getTime();
@@ -219,9 +227,12 @@ export function RoomControlPage() {
       return;
     }
     const bill = checkoutResult.acBill;
+    const accommodationSeconds = checkoutResult.accommodationBill?.accommodationSeconds;
+    const startTime = typeof accommodationSeconds === "number" ? formatLogicTime(0) : formatDate(bill.periodStart);
+    const endTime = typeof accommodationSeconds === "number" ? formatLogicTime(accommodationSeconds) : formatDate(bill.periodEnd);
     const rows = [
       ["房间号", "入住时间", "离开时间", "空调总费用"],
-      [bill.roomId, formatDate(bill.periodStart), formatDate(bill.periodEnd), bill.totalFee.toFixed(2)],
+      [bill.roomId, startTime, endTime, bill.totalFee.toFixed(2)],
     ];
     downloadCsv(`ac-bill-${bill.roomId}.csv`, rows);
     setMessage("空调账单已下载 (CSV)");
@@ -236,10 +247,15 @@ export function RoomControlPage() {
     let cumulative = 0;
     rows.push(["房间号", "请求时间", "服务开始时间", "服务结束时间", "服务时长(秒)", "风速", "当前费用", "累积费用"]);
     checkoutResult.detailRecords.forEach((rec) => {
-      const requestTime = formatDate(rec.startedAt); // 近似代指请求时间
-      const start = formatDate(rec.startedAt);
-      const end = formatDate(rec.endedAt);
-      const duration = calcDurationSeconds(rec.startedAt, rec.endedAt);
+      const requestTime = rec.logicStartSeconds != null ? formatLogicTime(rec.logicStartSeconds) : formatDate(rec.startedAt);
+      const start = rec.logicStartSeconds != null ? formatLogicTime(rec.logicStartSeconds) : formatDate(rec.startedAt);
+      const end = rec.logicEndSeconds != null ? formatLogicTime(rec.logicEndSeconds) : formatDate(rec.endedAt);
+      const duration =
+        typeof rec.durationSeconds === "number"
+          ? rec.durationSeconds
+          : rec.logicStartSeconds != null && rec.logicEndSeconds != null
+            ? Math.max(0, Math.round(rec.logicEndSeconds - rec.logicStartSeconds))
+            : calcDurationSeconds(rec.startedAt, rec.endedAt);
       const currentFee = rec.feeValue ?? 0;
       cumulative += currentFee;
       rows.push([
@@ -947,7 +963,11 @@ export function RoomControlPage() {
                     <div className="space-y-2 text-sm">
                       <div className="flex justify-between">
                         <span className="text-[#86868b]">计费时段</span>
-                        <span className="text-[#1d1d1f]">{checkoutResult.acBill.periodStart} → {checkoutResult.acBill.periodEnd}</span>
+                        <span className="text-[#1d1d1f]">
+                          {typeof checkoutResult.accommodationBill?.accommodationSeconds === "number"
+                            ? `${formatLogicTime(0)} → ${formatLogicTime(checkoutResult.accommodationBill.accommodationSeconds)}`
+                            : `${formatDate(checkoutResult.acBill.periodStart)} → ${formatDate(checkoutResult.acBill.periodEnd)}`}
+                        </span>
                       </div>
                       <div className="flex justify-between">
                         <span className="text-[#86868b]">费用合计</span>
@@ -977,7 +997,9 @@ export function RoomControlPage() {
                           <span className="font-medium text-[#1d1d1f]">¥{rec.feeValue.toFixed(2)}</span>
                         </div>
                         <div className="text-[#86868b]">
-                          {rec.startedAt} → {rec.endedAt ?? "进行中"} · 费率 ¥{rec.ratePerMin}/min
+                          {(rec.logicStartSeconds != null ? formatLogicTime(rec.logicStartSeconds) : formatDate(rec.startedAt))} →{" "}
+                          {rec.logicEndSeconds != null ? formatLogicTime(rec.logicEndSeconds) : rec.endedAt ? formatDate(rec.endedAt) : "进行中"} ·{" "}
+                          {rec.durationSeconds != null ? `${rec.durationSeconds}s` : "--"} · 费率 ¥{rec.ratePerMin}/min
                         </div>
                       </li>
                     ))}

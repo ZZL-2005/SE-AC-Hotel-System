@@ -130,6 +130,13 @@ class CheckOutService:
                     "speed": rec.speed,
                     "startedAt": rec.started_at.isoformat(),
                     "endedAt": rec.ended_at.isoformat() if rec.ended_at else None,
+                    "logicStartSeconds": rec.logic_start_seconds,
+                    "logicEndSeconds": rec.logic_end_seconds,
+                    "durationSeconds": (
+                        max(0, rec.logic_end_seconds - rec.logic_start_seconds)
+                        if rec.logic_start_seconds is not None and rec.logic_end_seconds is not None
+                        else None
+                    ),
                     "ratePerMin": rec.rate_per_min,
                     "feeValue": rec.fee_value,
                 }
@@ -198,6 +205,13 @@ class CheckOutService:
                     "speed": rec.speed,
                     "startedAt": rec.started_at.isoformat(),
                     "endedAt": rec.ended_at.isoformat() if rec.ended_at else None,
+                    "logicStartSeconds": rec.logic_start_seconds,
+                    "logicEndSeconds": rec.logic_end_seconds,
+                    "durationSeconds": (
+                        max(0, rec.logic_end_seconds - rec.logic_start_seconds)
+                        if rec.logic_start_seconds is not None and rec.logic_end_seconds is not None
+                        else None
+                    ),
                     "ratePerMin": rec.rate_per_min,
                     "feeValue": rec.fee_value,
                 }

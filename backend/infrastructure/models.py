@@ -55,6 +55,8 @@ class ACDetailRecordModel(SQLModel, table=True):
     speed: str
     started_at: datetime
     ended_at: Optional[datetime] = None
+    logic_start_seconds: Optional[int] = Field(default=None)
+    logic_end_seconds: Optional[int] = Field(default=None)
     rate_per_min: float = 0.0
     fee_value: float = 0.0
     timer_id: Optional[str] = Field(default=None)  # 关联 TimeManager 计时器
